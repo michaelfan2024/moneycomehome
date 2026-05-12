@@ -130,6 +130,83 @@ export async function makeWeChatCompatible(html: string, themeId: string): Promi
         }
     });
 
+    const isWideTable = (table: HTMLTableElement) => {
+        const rows = Array.from(table.querySelectorAll('tr'));
+        if (!rows.length) return false;
+        const columnCounts = rows.map((row) => row.children.length).filter(Boolean);
+        const maxColumns = Math.max(...columnCounts, 0);
+        return maxColumns >= 4;
+    };
+
+    const normalizeCellContent = (cell: Element) => {
+        const content = cell.innerHTML.trim();
+        return content || cell.textContent?.trim() || '暂无';
+    };
+
+    const convertWideTableToCards = (table: HTMLTableElement) => {
+        const rows = Array.from(table.querySelectorAll('tr'));
+        if (rows.length < 2) return table;
+
+        const headerRow = rows[0];
+        const headers = Array.from(headerRow.children).map((cell, index) => {
+            const label = cell.textContent?.replace(/\s+/g, ' ').trim();
+            return label || `字段${index + 1}`;
+        });
+        const bodyRows = rows.slice(1).filter((row) => row.children.length > 0);
+
+        const wrapper = doc.createElement('div');
+        wrapper.setAttribute('style', 'margin: 18px 0;');
+
+        bodyRows.forEach((row) => {
+            const rowCard = doc.createElement('div');
+            rowCard.setAttribute(
+                'style',
+                'margin: 14px 0; padding: 14px 16px; background-color: #ffffff !important; border: 1px solid rgba(15,23,42,0.10); border-radius: 14px; box-shadow: 0 4px 16px rgba(15,23,42,0.06);'
+            );
+
+            Array.from(row.children).forEach((cell, index) => {
+                const field = doc.createElement('div');
+                field.setAttribute('style', 'margin: 0 0 10px 0;');
+
+                const label = doc.createElement('div');
+                label.setAttribute(
+                    'style',
+                    'margin-bottom: 4px; color: #6b7280 !important; font-size: 12px; line-height: 1.5; font-weight: 600; letter-spacing: 0.01em;'
+                );
+                label.textContent = headers[index] || `字段${index + 1}`;
+
+                const value = doc.createElement('div');
+                value.setAttribute(
+                    'style',
+                    'color: #111827 !important; font-size: 14px; line-height: 1.8; word-break: break-word; overflow-wrap: anywhere;'
+                );
+                value.innerHTML = normalizeCellContent(cell);
+
+                field.appendChild(label);
+                field.appendChild(value);
+                rowCard.appendChild(field);
+            });
+
+            wrapper.appendChild(rowCard);
+        });
+
+        table.parentNode?.replaceChild(wrapper, table);
+    };
+
+    const tables = Array.from(section.querySelectorAll('table'));
+    tables.forEach((table) => {
+        if (isWideTable(table)) {
+            convertWideTableToCards(table as HTMLTableElement);
+            return;
+        }
+
+        table.setAttribute('style', `${table.getAttribute('style') || ''}; table-layout: fixed; word-break: break-word; overflow-wrap: anywhere;`);
+        table.querySelectorAll('th, td').forEach((cell) => {
+            const currentStyle = cell.getAttribute('style') || '';
+            cell.setAttribute('style', `${currentStyle}; vertical-align: top; word-break: break-word; overflow-wrap: anywhere;`);
+        });
+    });
+
     // 4. Force Inheritance
     // WeChat's editor aggressively overrides inherited fonts on <p>, <li>, etc.
     // So we manually distribute the container's font properties to all individual blocks.

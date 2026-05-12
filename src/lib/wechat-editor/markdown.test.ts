@@ -49,4 +49,20 @@ describe('wechat editor markdown rendering', () => {
     expect(doc.querySelector('strong')?.textContent).toBe('重点。')
     expect(compatible).not.toContain('data-md-')
   })
+
+  it('converts wide tables into stacked cards for mobile-friendly WeChat copy', async () => {
+    const rawHtml = renderMarkdown(`
+| 公司 | 行业方向 | 经营亮点 | 走势现象 | 后续观察点 | 风险点 |
+| --- | --- | --- | --- | --- | --- |
+| 中稀有色 | 稀有金属 | 一季度净利润同比增长261.55% | 市场关注度提升 | 稀土价格走势 | 稀土价格波动 |
+`)
+    const themed = applyTheme(rawHtml, 'wechat')
+    const compatible = await makeWeChatCompatible(themed, 'wechat')
+    const doc = new DOMParser().parseFromString(compatible, 'text/html')
+
+    expect(doc.querySelector('table')).toBeNull()
+    expect(doc.querySelectorAll('section > div > div > div')).toHaveLength(6)
+    expect(doc.body.textContent).toContain('中稀有色')
+    expect(doc.body.textContent).toContain('稀土价格波动')
+  })
 })

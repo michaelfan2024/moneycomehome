@@ -2,6 +2,7 @@
 
 import type { StockPoolItem, StockCompareResult } from '../types'
 import { useRouter } from 'next/navigation'
+import { memo, useMemo } from 'react'
 
 interface StockTableProps {
   data: (StockPoolItem | StockCompareResult)[]
@@ -9,11 +10,9 @@ interface StockTableProps {
   showActions?: boolean
 }
 
-export default function StockTable({ data, columns, showActions = false }: StockTableProps) {
+function StockTable({ data, columns, showActions = false }: StockTableProps) {
   const router = useRouter()
-  const defaultColumns = ['stock_code', 'stock_name', 'source', 'note']
-  
-  const displayColumns = columns || defaultColumns
+  const displayColumns = useMemo(() => columns || ['stock_code', 'stock_name', 'source', 'note'], [columns])
   
   const getStatusLabel = (status: string) => {
     const labels: Record<string, string> = {
@@ -129,3 +128,5 @@ export default function StockTable({ data, columns, showActions = false }: Stock
     </div>
   )
 }
+
+export default memo(StockTable)

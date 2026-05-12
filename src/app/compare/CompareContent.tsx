@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useMemo, useState, useEffect } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import StockTable from '../../components/StockTable'
 import { getBatches, getCompareResults } from '../../lib/api'
@@ -108,7 +108,8 @@ export default function CompareContent() {
     fetchCompareResults()
   }, [selectedDate])
 
-  const filteredResults = compareResults.filter((result) => {
+  const filteredResults = useMemo(() => {
+    const normalizedQuery = searchQuery.trim().toLowerCase()
     const statusMap: Record<string, string[]> = {
       'all': ['first_seen', 'new', 'continued', 'removed', 'reappeared'],
       'new': ['first_seen', 'reappeared'],
@@ -117,15 +118,18 @@ export default function CompareContent() {
       'continued': ['continued'],
       'removed': ['removed'],
     }
-    
+
     const targetStatuses = statusMap[statusFilter] || ['all']
-    const matchesStatus = statusFilter === 'all' || targetStatuses.includes(result.status)
-    const matchesSearch =
-      searchQuery === '' ||
-      result.stock_code.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      result.stock_name.toLowerCase().includes(searchQuery.toLowerCase())
-    return matchesStatus && matchesSearch
-  })
+
+    return compareResults.filter((result) => {
+      const matchesStatus = statusFilter === 'all' || targetStatuses.includes(result.status)
+      const matchesSearch =
+        normalizedQuery === '' ||
+        result.stock_code.toLowerCase().includes(normalizedQuery) ||
+        result.stock_name.toLowerCase().includes(normalizedQuery)
+      return matchesStatus && matchesSearch
+    })
+  }, [compareResults, searchQuery, statusFilter])
 
   const statusOptions: { value: StockStatus | 'all'; label: string }[] = [
     { value: 'all', label: '全部' },
@@ -136,7 +140,7 @@ export default function CompareContent() {
     { value: 'reappeared', label: '重新出现' },
   ]
 
-  const getStatusCount = (status: StockStatus) => {
+  const statusCounts = useMemo(() => {
     const statusMap: Record<string, string[]> = {
       'new': ['first_seen', 'reappeared'],
       'first_seen': ['first_seen'],
@@ -144,12 +148,27 @@ export default function CompareContent() {
       'continued': ['continued'],
       'removed': ['removed'],
     }
-    
-    const targetStatuses = statusMap[status] || [status]
-    const filtered = compareResults.filter((r) => targetStatuses.includes(r.status))
-    const uniqueCodes = new Set(filtered.map(r => r.stock_code))
-    return uniqueCodes.size
-  }
+
+    const counts: Record<string, number> = {
+      new: 0,
+      first_seen: 0,
+      reappeared: 0,
+      continued: 0,
+      removed: 0,
+      all: new Set(compareResults.map((r) => r.stock_code)).size,
+    }
+
+    for (const [status, targetStatuses] of Object.entries(statusMap)) {
+      const uniqueCodes = new Set(
+        compareResults
+          .filter((result) => targetStatuses.includes(result.status))
+          .map((result) => result.stock_code)
+      )
+      counts[status] = uniqueCodes.size
+    }
+
+    return counts
+  }, [compareResults])
 
   if (loading) {
     return (
@@ -222,23 +241,23 @@ export default function CompareContent() {
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
           <div className="stat-card cursor-pointer hover:scale-[1.02]" onClick={() => setStatusFilter('new')}>
             <p className="text-sm text-green-400">新增</p>
-            <p className="text-2xl font-bold text-[var(--text-primary)]">{getStatusCount('new')}</p>
+            <p className="text-2xl font-bold text-[var(--text-primary)]">{statusCounts.new}</p>
           </div>
           <div className="stat-card cursor-pointer hover:scale-[1.02]" onClick={() => setStatusFilter('continued')}>
             <p className="text-sm text-blue-400">继续存在</p>
-            <p className="text-2xl font-bold text-[var(--text-primary)]">{getStatusCount('continued')}</p>
+            <p className="text-2xl font-bold text-[var(--text-primary)]">{statusCounts.continued}</p>
           </div>
           <div className="stat-card cursor-pointer hover:scale-[1.02]" onClick={() => setStatusFilter('removed')}>
             <p className="text-sm text-red-400">剔除</p>
-            <p className="text-2xl font-bold text-[var(--text-primary)]">{getStatusCount('removed')}</p>
+            <p className="text-2xl font-bold text-[var(--text-primary)]">{statusCounts.removed}</p>
           </div>
           <div className="stat-card cursor-pointer hover:scale-[1.02]" onClick={() => setStatusFilter('reappeared')}>
             <p className="text-sm text-purple-400">重新出现</p>
-            <p className="text-2xl font-bold text-[var(--text-primary)]">{getStatusCount('reappeared')}</p>
+            <p className="text-2xl font-bold text-[var(--text-primary)]">{statusCounts.reappeared}</p>
           </div>
           <div className="stat-card cursor-pointer hover:scale-[1.02]" onClick={() => setStatusFilter('all')}>
             <p className="text-sm text-[var(--text-secondary)]">总计</p>
-            <p className="text-2xl font-bold text-[var(--text-primary)]">{new Set(compareResults.map(r => r.stock_code)).size}</p>
+            <p className="text-2xl font-bold text-[var(--text-primary)]">{statusCounts.all}</p>
           </div>
         </div>
       )}

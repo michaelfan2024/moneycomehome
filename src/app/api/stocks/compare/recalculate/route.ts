@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server'
 import { ensureTables, getAllBatches, getStockItemsByBatch, deleteCompareResultsByDate, createCompareResults } from '../../../../../lib/db'
-import { compareStockPools } from '../../../../../lib/comparer'
-import type { StockPoolItem } from '../../../../../types'
+import { buildCompareResultsForBatches, type BatchItemsMap } from '../../../../../lib/compare-recalculate'
 
 export async function POST(request: Request) {
   try {
@@ -16,47 +15,26 @@ export async function POST(request: Request) {
 
     const sortedBatches = [...batches].sort((a, b) => new Date(a.batch_date).getTime() - new Date(b.batch_date).getTime())
     console.log('Sorted batches:', sortedBatches.map(b => `${b.batch_date} (id: ${b.id})`))
-    
-    for (let i = 1; i < sortedBatches.length; i++) {
-      const currentBatch = sortedBatches[i]
-      const previousBatch = sortedBatches[i - 1]
-      
-      console.log(`Processing comparison for date: ${currentBatch.batch_date}`)
-      
-      const [currentItems, previousItems] = await Promise.all([
-        getStockItemsByBatch(parseInt(String(currentBatch.id))),
-        getStockItemsByBatch(parseInt(String(previousBatch.id)))
-      ])
 
-      if (currentItems && previousItems) {
-        console.log(`Current items count: ${currentItems.length}, Previous items count: ${previousItems.length}`)
-        
-        const allHistoricalItems: StockPoolItem[] = []
-        for (const histBatch of sortedBatches) {
-          if (histBatch.id !== currentBatch.id) {
-            const items = await getStockItemsByBatch(parseInt(String(histBatch.id)))
-            if (items) {
-              allHistoricalItems.push(...items)
-            }
-          }
-        }
-        console.log(`Historical items count: ${allHistoricalItems.length}`)
+    const itemsByBatchId: BatchItemsMap = new Map()
+    const itemFetches = sortedBatches.map(async (batch) => {
+      const items = await getStockItemsByBatch(parseInt(String(batch.id)))
+      itemsByBatchId.set(batch.id, items || [])
+    })
+    await Promise.all(itemFetches)
 
-        const { compareResults } = compareStockPools(
-          currentItems,
-          previousItems,
-          allHistoricalItems
-        )
-        console.log(`Compare results count: ${compareResults.length}`)
+    const compareJobs = buildCompareResultsForBatches(sortedBatches, itemsByBatchId)
+    console.log(`Prepared ${compareJobs.length} compare batches`)
 
-        await deleteCompareResultsByDate(currentBatch.batch_date)
-        console.log(`Deleted existing compare results for ${currentBatch.batch_date}`)
-        
-        const createResult = await createCompareResults(compareResults)
-        console.log(`Created ${createResult?.length || 0} compare results for ${currentBatch.batch_date}`)
-      } else {
-        console.log('Skipping comparison - missing current or previous items')
-      }
+    for (const { batch, compareResults } of compareJobs) {
+      console.log(`Processing comparison for date: ${batch.batch_date}`)
+      console.log(`Compare results count: ${compareResults.length}`)
+
+      await deleteCompareResultsByDate(batch.batch_date)
+      console.log(`Deleted existing compare results for ${batch.batch_date}`)
+
+      const createResult = await createCompareResults(compareResults)
+      console.log(`Created ${createResult?.length || 0} compare results for ${batch.batch_date}`)
     }
 
     return NextResponse.json({ success: true, message: '对比结果重新计算完成' })

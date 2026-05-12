@@ -4,7 +4,7 @@ interface CacheEntry<T> {
 }
 
 const cache = new Map<string, CacheEntry<unknown>>()
-const CACHE_DURATION = 60000 
+const CACHE_DURATION = 5 * 60 * 1000
 
 export function setCache<T>(key: string, data: T): void {
   cache.set(key, {

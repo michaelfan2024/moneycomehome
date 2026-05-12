@@ -1,4 +1,5 @@
 import type { StockBatch, StockPoolItem, StockCompareResult, StockDetail, DashboardStats } from '../types'
+import type { ComparePageData, DashboardOverview } from './stocks-page-data'
 
 export async function uploadStockData(date: string, file: File): Promise<{ success: boolean; count?: number; error?: string }> {
   const formData = new FormData()
@@ -27,6 +28,11 @@ export async function uploadStockDataByText(date: string, text: string): Promise
 
 export async function getBatches(): Promise<{ success: boolean; data: StockBatch[] | null }> {
   const response = await fetch('/api/stocks/batches')
+  return response.json()
+}
+
+export async function getDashboardOverview(): Promise<{ success: boolean; data: DashboardOverview | null }> {
+  const response = await fetch('/api/stocks/dashboard')
   return response.json()
 }
 
@@ -75,6 +81,12 @@ export async function getStockItems(batchId?: number): Promise<{ success: boolea
 
 export async function getCompareResults(date?: string): Promise<{ success: boolean; data: StockCompareResult[] | null }> {
   const url = date ? `/api/stocks/compare?date=${date}` : '/api/stocks/compare'
+  const response = await fetch(url)
+  return response.json()
+}
+
+export async function getComparePageData(date?: string): Promise<{ success: boolean; data: ComparePageData | null }> {
+  const url = date ? `/api/stocks/compare/page-data?date=${encodeURIComponent(date)}` : '/api/stocks/compare/page-data'
   const response = await fetch(url)
   return response.json()
 }

@@ -3,7 +3,7 @@
 import { useMemo, useState, useEffect } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import StockTable from '../../components/StockTable'
-import { getBatches, getCompareResults } from '../../lib/api'
+import { getComparePageData, getCompareResults } from '../../lib/api'
 import type { StockBatch, StockCompareResult, StockStatus } from '../../types'
 
 function exportToCSV(data: StockCompareResult[]) {
@@ -54,59 +54,51 @@ export default function CompareContent() {
   const [statusFilter, setStatusFilter] = useState<StockStatus | 'all'>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [loading, setLoading] = useState(true)
+  const requestedDate = searchParams.get('date') || undefined
+  const requestedFilter = searchParams.get('filter')
 
   const isNewStockFilter = statusFilter === 'new' || statusFilter === 'first_seen'
 
   useEffect(() => {
-    const fetchBatches = async () => {
+    const fetchInitialPageData = async () => {
       setLoading(true)
       try {
-        const result = await getBatches()
-        const data = result.data || []
-        setBatches(data)
-        
-        const urlDate = searchParams.get('date')
-        if (urlDate && data.some(b => b.batch_date === urlDate)) {
-          setSelectedDate(urlDate)
-        } else if (data.length > 0) {
-          setSelectedDate(data[0].batch_date)
-        }
+        const result = await getComparePageData(requestedDate)
+        const data = result.data
+        setBatches(data?.batches || [])
+        setSelectedDate(data?.selectedDate || '')
+        setCompareResults(data?.results || [])
       } catch (error) {
-        console.error('Error fetching batches:', error)
+        console.error('Error fetching compare page data:', error)
       } finally {
         setLoading(false)
       }
     }
 
-    fetchBatches()
-  }, [searchParams])
+    fetchInitialPageData()
+  }, [requestedDate])
 
   useEffect(() => {
-    const urlFilter = searchParams.get('filter')
-    if (urlFilter) {
+    if (requestedFilter) {
       const validFilters: (StockStatus | 'all')[] = ['all', 'first_seen', 'new', 'continued', 'removed', 'reappeared']
-      if (validFilters.includes(urlFilter as StockStatus | 'all')) {
-        setStatusFilter(urlFilter as StockStatus | 'all')
+      if (validFilters.includes(requestedFilter as StockStatus | 'all')) {
+        setStatusFilter(requestedFilter as StockStatus | 'all')
       }
     }
-  }, [searchParams])
+  }, [requestedFilter])
 
-  useEffect(() => {
-    const fetchCompareResults = async () => {
-      if (!selectedDate) return
-      setLoading(true)
-      try {
-        const result = await getCompareResults(selectedDate)
-        setCompareResults(result.data || [])
-      } catch (error) {
-        console.error('Error fetching compare results:', error)
-      } finally {
-        setLoading(false)
-      }
+  const handleDateChange = async (date: string) => {
+    setSelectedDate(date)
+    setLoading(true)
+    try {
+      const result = await getCompareResults(date)
+      setCompareResults(result.data || [])
+    } catch (error) {
+      console.error('Error fetching compare results:', error)
+    } finally {
+      setLoading(false)
     }
-
-    fetchCompareResults()
-  }, [selectedDate])
+  }
 
   const filteredResults = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase()
@@ -198,7 +190,7 @@ export default function CompareContent() {
             <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">选择日期</label>
             <select
               value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
+              onChange={(e) => handleDateChange(e.target.value)}
               className="select-field"
             >
               {batches.map((batch) => (

@@ -3,7 +3,6 @@ import { ensureTables, getAllBatches, getBatchByDate, deleteBatch, deleteStockIt
 
 export async function GET(request: Request) {
   try {
-    await ensureTables()
     const url = new URL(request.url)
     const date = url.searchParams.get('date')
 

@@ -1,9 +1,8 @@
 import { NextResponse } from 'next/server'
-import { ensureTables, getCompareResultsByDate, getLatestBatch } from '../../../../lib/db'
+import { getCompareResultsByDate, getLatestBatch } from '../../../../lib/db'
 
 export async function GET(request: Request) {
   try {
-    await ensureTables()
     const url = new URL(request.url)
     const date = url.searchParams.get('date')
 

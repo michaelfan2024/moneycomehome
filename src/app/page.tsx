@@ -4,36 +4,35 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import StatsCard from '../components/StatsCard'
 import WisdomCard from '../components/WisdomCard'
-import { getStats, getBatches, deleteBatchById, updateBatchDate, recalculateCompareResults } from '../lib/api'
+import { getDashboardOverview, deleteBatchById, updateBatchDate, recalculateCompareResults } from '../lib/api'
 import type { DashboardStats, StockBatch } from '../types'
 
 export default function DashboardPage() {
   const router = useRouter()
   const [stats, setStats] = useState<DashboardStats | null>(null)
   const [batches, setBatches] = useState<StockBatch[]>([])
+  const [totalBatchCount, setTotalBatchCount] = useState(0)
   const [loading, setLoading] = useState(true)
   const [deletingId, setDeletingId] = useState<number | null>(null)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editDateValue, setEditDateValue] = useState<string>('')
 
-  useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true)
-      try {
-        const [statsResult, batchesResult] = await Promise.all([
-          getStats(),
-          getBatches()
-        ])
-        setStats(statsResult.data || null)
-        setBatches(batchesResult.data || [])
-      } catch (error) {
-        console.error('Error fetching dashboard data:', error)
-      } finally {
-        setLoading(false)
-      }
+  const fetchDashboardData = async () => {
+    setLoading(true)
+    try {
+      const result = await getDashboardOverview()
+      setStats(result.data?.stats || null)
+      setBatches(result.data?.batches || [])
+      setTotalBatchCount(result.data?.totalBatchCount || 0)
+    } catch (error) {
+      console.error('Error fetching dashboard data:', error)
+    } finally {
+      setLoading(false)
     }
+  }
 
-    fetchData()
+  useEffect(() => {
+    fetchDashboardData()
   }, [])
 
   const handleCardClick = (filterType: string) => {
@@ -55,7 +54,7 @@ export default function DashboardPage() {
     try {
       const result = await deleteBatchById(batchId)
       if (result.success) {
-        setBatches(batches.filter(b => String(b.id) !== String(batchId)))
+        await fetchDashboardData()
       } else {
         alert('删除失败')
       }
@@ -85,11 +84,9 @@ export default function DashboardPage() {
       console.log('API response:', result)
       
       if (result.success) {
-        setBatches(batches.map(b => 
-           String(b.id) === String(batchId) ? { ...b, batch_date: editDateValue } : b
-         ))
         setEditingId(null)
         setEditDateValue('')
+        await fetchDashboardData()
         console.log('Local state updated successfully')
       } else {
         console.error('API update failed:', result.error)
@@ -109,7 +106,7 @@ export default function DashboardPage() {
   const [recalculating, setRecalculating] = useState(false)
   
   const handleRecalculate = async () => {
-    if (batches.length < 2) {
+    if (totalBatchCount < 2) {
       alert('至少需要两份数据才能进行对比')
       return
     }
@@ -118,11 +115,7 @@ export default function DashboardPage() {
     try {
       const result = await recalculateCompareResults()
       if (result.success) {
-        const statsResult = await getStats()
-        setStats(statsResult.data || null)
-        
-        const batchesResult = await getBatches()
-        setBatches(batchesResult.data || [])
+        await fetchDashboardData()
       } else {
         console.error('Recalculation failed:', result.error)
       }
@@ -200,9 +193,9 @@ export default function DashboardPage() {
             </div>
             <div className="flex items-center gap-3">
               <span className="text-sm text-[var(--text-muted)] bg-[var(--bg-dark)] px-3 py-1 rounded-full">
-                {batches.length} 条记录
+                {totalBatchCount} 条记录
               </span>
-              {batches.length >= 2 && (
+              {totalBatchCount >= 2 && (
                 <button
                   onClick={handleRecalculate}
                   disabled={recalculating}
@@ -334,13 +327,13 @@ export default function DashboardPage() {
               </div>
             )}
           </div>
-          {batches.length > 6 && (
+          {totalBatchCount > 6 && (
             <div className="mt-4 text-center">
               <button
                 onClick={() => router.push('/compare')}
                 className="text-sm text-[var(--primary-color)] hover:underline"
               >
-                查看全部 {batches.length} 条记录 →
+                查看全部 {totalBatchCount} 条记录 →
               </button>
             </div>
           )}

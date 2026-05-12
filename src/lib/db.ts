@@ -1,47 +1,80 @@
-import { Client } from 'pg'
+import { Pool } from 'pg'
 import { randomUUID } from 'crypto'
 import type { StockBatch, StockPoolItem, StockCompareResult, StockDetail, DashboardStats, StockStatus } from '../types'
 import { getCache, setCache, invalidateCache } from './cache'
 import type { ReportTemplateInput, ReportTemplateRecord } from './report-template'
 import type { EastmoneyFinanceSummary } from './eastmoney-finance'
+import type { ComparePageData, DashboardOverview } from './stocks-page-data'
 
 const databaseUrl = process.env.DATABASE_URL
 
-let client: Client | null = null
+let pool: Pool | null = null
 let tablesInitialized = false
 let initializationPromise: Promise<void> | null = null
+let keepAliveTimer: ReturnType<typeof setInterval> | null = null
 
-async function getClient(): Promise<Client> {
+function invalidateStockPageCaches(date?: string): void {
+  const normalizedDate = date?.split('T')[0]
+  invalidateCache('batches')
+  invalidateCache('dashboard_stats')
+  invalidateCache('dashboard_overview_6')
+  invalidateCache('compare_page_data_latest')
+
+  if (normalizedDate) {
+    invalidateCache(`compare_results_${normalizedDate}`)
+    invalidateCache(`compare_page_data_${normalizedDate}`)
+  }
+
+  for (const minDays of [2, 3, 5, 10]) {
+    invalidateCache(`continuous_ranking_${minDays}`)
+  }
+}
+
+async function getClient(): Promise<Pool> {
   if (!databaseUrl) {
     throw new Error('DATABASE_URL is not set')
   }
 
-  if (client) {
-    try {
-      await client.query('SELECT 1')
-      return client
-    } catch (error) {
-      console.error('Existing client connection failed, reconnecting...')
-      client = null
-    }
+  if (pool) {
+    return pool
   }
 
-  client = new Client({
+  pool = new Pool({
     connectionString: databaseUrl,
     ssl: {
       rejectUnauthorized: false
     },
-    connectionTimeoutMillis: 10000
+    connectionTimeoutMillis: 10000,
+    idleTimeoutMillis: 0,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10000,
+    max: 10
   })
 
-  await client.connect()
-  
-  await client.query("SET client_encoding = 'UTF8'")
-  await client.query("SET NAMES 'UTF8'")
-  
-  console.log('Database connected with UTF-8 encoding')
+  pool.on('error', (error) => {
+    console.error('Idle database pool client error:', error)
+  })
 
-  return client
+  const pooledClient = await pool.connect()
+  try {
+    await pooledClient.query("SET client_encoding = 'UTF8'")
+    await pooledClient.query("SET NAMES 'UTF8'")
+  } finally {
+    pooledClient.release()
+  }
+
+  console.log('Database pool initialized with UTF-8 encoding')
+
+  if (!keepAliveTimer) {
+    keepAliveTimer = setInterval(() => {
+      pool?.query('SELECT 1').catch((error) => {
+        console.error('Database keepalive failed:', error)
+      })
+    }, 4 * 60 * 1000)
+    keepAliveTimer.unref?.()
+  }
+
+  return pool
 }
 
 export async function ensureTables(): Promise<void> {
@@ -141,6 +174,9 @@ export async function ensureTables(): Promise<void> {
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_compare_results_trade_date ON stock_compare_results(trade_date)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_compare_results_stock_code ON stock_compare_results(stock_code)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_compare_results_status ON stock_compare_results(status)')
+      await client.query('CREATE INDEX IF NOT EXISTS idx_stock_batches_batch_date_desc ON stock_batches(batch_date DESC)')
+      await client.query('CREATE INDEX IF NOT EXISTS idx_stock_compare_results_trade_date_status_code ON stock_compare_results(trade_date, status, stock_code)')
+      await client.query('CREATE INDEX IF NOT EXISTS idx_stock_compare_results_trade_date_continuous_count ON stock_compare_results(trade_date, continuous_count DESC)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_report_templates_updated_at ON report_templates(updated_at DESC)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_financial_reports_stock_code ON stock_financial_reports(stock_code)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_financial_reports_report_date ON stock_financial_reports(report_date DESC)')
@@ -167,8 +203,7 @@ export async function createBatch(batchDate: string, fileName: string, totalCoun
       [normalizedDate, fileName, totalCount]
     )
     
-    invalidateCache('batches')
-    invalidateCache('dashboard_stats')
+    invalidateStockPageCaches(normalizedDate)
     
     return result.rows[0]
   } catch (error) {
@@ -204,8 +239,7 @@ export async function deleteBatch(batchId: number): Promise<boolean> {
     const client = await getClient()
     await client.query('DELETE FROM stock_batches WHERE id = $1', [batchId])
     
-    invalidateCache('batches')
-    invalidateCache('dashboard_stats')
+    invalidateStockPageCaches()
     
     return true
   } catch (error) {
@@ -227,8 +261,7 @@ export async function updateBatchDate(batchId: number, newDate: string): Promise
     
     console.log('Update result:', result.rowCount, 'rows affected')
     
-    invalidateCache('batches')
-    invalidateCache('dashboard_stats')
+    invalidateStockPageCaches(normalizedDate)
     
     return (result.rowCount ?? 0) > 0
   } catch (error) {
@@ -255,6 +288,9 @@ export async function createStockItems(items: Omit<StockPoolItem, 'id' | 'create
     )
     
     console.log('Created', result.rows.length, 'stock items')
+    if (items.length > 0) {
+      invalidateStockPageCaches(items[0].trade_date)
+    }
     return result.rows
   } catch (error) {
     console.error('Error creating stock items:', error)
@@ -340,6 +376,175 @@ export async function getAllBatches(): Promise<StockBatch[] | null> {
   }
 }
 
+const emptyDashboardStats: DashboardStats = {
+  today_count: 0,
+  today_new: 0,
+  today_removed: 0,
+  continuous_3d_count: 0,
+  continuous_5d_count: 0
+}
+
+export async function getDashboardOverview(recentLimit: number = 6): Promise<DashboardOverview | null> {
+  const cacheKey = `dashboard_overview_${recentLimit}`
+  const cached = getCache<DashboardOverview>(cacheKey)
+  if (cached) {
+    return cached
+  }
+
+  try {
+    const client = await getClient()
+    const result = await client.query(
+      `
+      WITH latest_batch AS (
+        SELECT id, batch_date
+        FROM stock_batches
+        ORDER BY batch_date DESC
+        LIMIT 1
+      ),
+      stats AS (
+        SELECT
+          COALESCE((SELECT COUNT(*) FROM stock_pool_items WHERE batch_id = (SELECT id FROM latest_batch)), 0)::int as today_count,
+          COALESCE(SUM(CASE WHEN status IN ('new', 'first_seen', 'reappeared') THEN 1 ELSE 0 END), 0)::int as today_new,
+          COALESCE(SUM(CASE WHEN status = 'removed' THEN 1 ELSE 0 END), 0)::int as today_removed,
+          COALESCE(SUM(CASE WHEN continuous_count >= 3 THEN 1 ELSE 0 END), 0)::int as continuous_3d_count,
+          COALESCE(SUM(CASE WHEN continuous_count >= 5 THEN 1 ELSE 0 END), 0)::int as continuous_5d_count
+        FROM stock_compare_results
+        WHERE trade_date = (SELECT batch_date FROM latest_batch)
+      ),
+      recent_batches AS (
+        SELECT COALESCE(json_agg(row_to_json(batch_row)), '[]'::json) as batches
+        FROM (
+          SELECT
+            id::text as id,
+            batch_date::text as batch_date,
+            file_name,
+            total_count,
+            created_at::text as created_at
+          FROM stock_batches
+          ORDER BY batch_date DESC
+          LIMIT $1
+        ) batch_row
+      ),
+      batch_count AS (
+        SELECT COUNT(*)::int as total_batch_count
+        FROM stock_batches
+      )
+      SELECT
+        stats.today_count,
+        stats.today_new,
+        stats.today_removed,
+        stats.continuous_3d_count,
+        stats.continuous_5d_count,
+        recent_batches.batches,
+        batch_count.total_batch_count
+      FROM stats
+      CROSS JOIN recent_batches
+      CROSS JOIN batch_count
+      `,
+      [recentLimit]
+    )
+
+    const row = result.rows[0]
+    const overview: DashboardOverview = {
+      stats: row ? {
+        today_count: Number(row.today_count) || 0,
+        today_new: Number(row.today_new) || 0,
+        today_removed: Number(row.today_removed) || 0,
+        continuous_3d_count: Number(row.continuous_3d_count) || 0,
+        continuous_5d_count: Number(row.continuous_5d_count) || 0
+      } : emptyDashboardStats,
+      batches: row?.batches || [],
+      totalBatchCount: Number(row?.total_batch_count) || 0
+    }
+
+    setCache(cacheKey, overview)
+    return overview
+  } catch (error) {
+    console.error('Error getting dashboard overview:', error)
+    return null
+  }
+}
+
+export async function getComparePageData(requestedDate?: string | null): Promise<ComparePageData | null> {
+  const normalizedDate = requestedDate?.split('T')[0]
+  const safeDate = normalizedDate && /^\d{4}-\d{2}-\d{2}$/.test(normalizedDate) ? normalizedDate : null
+  const cacheKey = `compare_page_data_${safeDate || 'latest'}`
+  const cached = getCache<ComparePageData>(cacheKey)
+  if (cached) {
+    return cached
+  }
+
+  try {
+    const client = await getClient()
+    const result = await client.query(
+      `
+      WITH batches AS (
+        SELECT
+          id::text as id,
+          batch_date::text as batch_date,
+          batch_date as raw_batch_date,
+          file_name,
+          total_count,
+          created_at::text as created_at
+        FROM stock_batches
+        ORDER BY batch_date DESC
+      ),
+      selected_batch AS (
+        SELECT COALESCE(
+          (SELECT raw_batch_date FROM batches WHERE raw_batch_date = $1::date LIMIT 1),
+          (SELECT raw_batch_date FROM batches LIMIT 1)
+        ) as batch_date
+      ),
+      batch_json AS (
+        SELECT COALESCE(json_agg(row_to_json(batch_row)), '[]'::json) as batches
+        FROM (
+          SELECT id, batch_date, file_name, total_count, created_at
+          FROM batches
+        ) batch_row
+      ),
+      result_json AS (
+        SELECT COALESCE(json_agg(row_to_json(result_row)), '[]'::json) as results
+        FROM (
+          SELECT
+            id::text as id,
+            trade_date::text as trade_date,
+            stock_code,
+            stock_name,
+            status,
+            continuous_count,
+            total_appear_count,
+            last_seen_date::text as last_seen_date,
+            created_at::text as created_at
+          FROM stock_compare_results
+          WHERE trade_date = (SELECT batch_date FROM selected_batch)
+          ORDER BY status, stock_code
+        ) result_row
+      )
+      SELECT
+        batch_json.batches,
+        COALESCE((SELECT batch_date::text FROM selected_batch), '') as selected_date,
+        result_json.results
+      FROM batch_json
+      CROSS JOIN result_json
+      `,
+      [safeDate]
+    )
+
+    const row = result.rows[0]
+    const pageData: ComparePageData = {
+      batches: row?.batches || [],
+      selectedDate: row?.selected_date || '',
+      results: row?.results || []
+    }
+
+    setCache(cacheKey, pageData)
+    return pageData
+  } catch (error) {
+    console.error('Error getting compare page data:', error)
+    return null
+  }
+}
+
 export async function createCompareResults(results: Omit<StockCompareResult, 'id' | 'created_at'>[]): Promise<StockCompareResult[] | null> {
   try {
     const client = await getClient()
@@ -354,7 +559,7 @@ export async function createCompareResults(results: Omit<StockCompareResult, 'id
       params
     )
     
-    invalidateCache('dashboard_stats')
+    invalidateStockPageCaches(results[0]?.trade_date)
     if (results.length > 0) {
       invalidateCache(`compare_results_${results[0].trade_date}`)
     }
@@ -369,7 +574,9 @@ export async function createCompareResults(results: Omit<StockCompareResult, 'id
 export async function deleteCompareResultsByDate(date: string): Promise<boolean> {
   try {
     const client = await getClient()
-    await client.query('DELETE FROM stock_compare_results WHERE trade_date = $1', [date])
+    const normalizedDate = date.split('T')[0]
+    await client.query('DELETE FROM stock_compare_results WHERE trade_date = $1', [normalizedDate])
+    invalidateStockPageCaches(normalizedDate)
     return true
   } catch (error) {
     console.error('Error deleting compare results:', error)
@@ -521,15 +728,40 @@ export async function getStockDetail(stockCode: string): Promise<StockDetail | n
 }
 
 export async function getContinuousRanking(minDays: number = 2): Promise<StockCompareResult[] | null> {
-  const latestBatch = await getLatestBatch()
-  if (!latestBatch) return null
+  const cacheKey = `continuous_ranking_${minDays}`
+  const cached = getCache<StockCompareResult[]>(cacheKey)
+  if (cached) {
+    return cached
+  }
 
   try {
     const client = await getClient()
     const result = await client.query(
-      'SELECT * FROM stock_compare_results WHERE trade_date = $1 AND continuous_count >= $2 ORDER BY continuous_count DESC',
-      [latestBatch.batch_date, minDays]
+      `
+      WITH latest_batch AS (
+        SELECT batch_date
+        FROM stock_batches
+        ORDER BY batch_date DESC
+        LIMIT 1
+      )
+      SELECT
+        id::text as id,
+        trade_date::text as trade_date,
+        stock_code,
+        stock_name,
+        status,
+        continuous_count,
+        total_appear_count,
+        last_seen_date::text as last_seen_date,
+        created_at::text as created_at
+      FROM stock_compare_results
+      WHERE trade_date = (SELECT batch_date FROM latest_batch)
+        AND continuous_count >= $1
+      ORDER BY continuous_count DESC, stock_code
+      `,
+      [minDays]
     )
+    setCache(cacheKey, result.rows)
     return result.rows
   } catch (error) {
     console.error('Error getting continuous ranking:', error)

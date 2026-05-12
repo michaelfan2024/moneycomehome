@@ -1,9 +1,8 @@
 import { NextResponse } from 'next/server'
-import { ensureTables, getContinuousRanking } from '../../../../lib/db'
+import { getContinuousRanking } from '../../../../lib/db'
 
 export async function GET(request: Request) {
   try {
-    await ensureTables()
     const url = new URL(request.url)
     const minDays = parseInt(url.searchParams.get('minDays') || '2')
 

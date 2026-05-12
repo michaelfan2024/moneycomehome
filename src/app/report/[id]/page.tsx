@@ -12,6 +12,27 @@ interface Report {
   createdAt: string
   publishedAt?: string
   publishedTo?: string
+  financeSources?: Array<{
+    stockCode: string
+    stockName: string
+    orgType?: string
+    reportPeriod: string
+    reportType: string
+    reportDateName?: string
+    noticeDate?: string
+    updateDate?: string
+    eps?: number | null
+    bps?: number | null
+    cashPerShare?: number | null
+    roe?: number | null
+    revenueYoy?: number | null
+    netProfitYoy?: number | null
+    grossMargin?: number | null
+    revenue?: number | null
+    totalProfit?: number | null
+    netProfit?: number | null
+    sourceUrl: string
+  }>
 }
 
 export default function ReportViewPage() {
@@ -169,6 +190,59 @@ export default function ReportViewPage() {
             {report.content}
           </div>
         </article>
+      </div>
+
+      <div className="card p-6 space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold">财报来源</h2>
+          <p className="text-sm text-[var(--text-secondary)] mt-1">
+            本报告引用的东方财富公开财报数据，优先使用已发布最新一期。
+          </p>
+        </div>
+
+        {report.financeSources && report.financeSources.length > 0 ? (
+          <div className="grid gap-4">
+            {report.financeSources.map((source) => (
+              <div key={`${source.stockCode}-${source.reportPeriod}`} className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="font-medium">
+                      {source.stockName} <span className="text-[var(--text-secondary)]">{source.stockCode}</span>
+                    </div>
+                    <div className="text-sm text-[var(--text-secondary)] mt-1">
+                      {source.orgType ? `${source.orgType} · ` : ''}
+                      {source.reportPeriod}
+                      {source.reportType ? ` · ${source.reportType}` : ''}
+                    </div>
+                  </div>
+                  <a
+                    href={source.sourceUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-sm text-[var(--primary-color)] hover:underline"
+                  >
+                    查看原始数据
+                  </a>
+                </div>
+
+                <div className="mt-4 grid gap-3 text-sm text-[var(--text-secondary)] md:grid-cols-2">
+                  <div>公告日期：{source.noticeDate || '未知'}</div>
+                  <div>更新日期：{source.updateDate || '未知'}</div>
+                  <div>营收：{source.revenue ?? '未知'}</div>
+                  <div>营收同比：{source.revenueYoy ?? '未知'}%</div>
+                  <div>净利润：{source.netProfit ?? '未知'}</div>
+                  <div>净利润同比：{source.netProfitYoy ?? '未知'}%</div>
+                  <div>ROE：{source.roe ?? '未知'}%</div>
+                  <div>基本每股收益：{source.eps ?? '未知'}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-[var(--text-secondary)]">
+            这份报告没有保存财报来源，可能是较早生成的历史报告。
+          </p>
+        )}
       </div>
 
       <div className="text-center text-sm text-[var(--text-secondary)]">

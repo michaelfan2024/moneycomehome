@@ -22,7 +22,8 @@ interface AIAnalysisResult {
 export async function callAIAnalysis(
   stocks: StockCompareResult[], 
   date: string,
-  template: AnalysisTemplate = DEFAULT_TEMPLATE
+  template: AnalysisTemplate = DEFAULT_TEMPLATE,
+  financeContext?: string
 ): Promise<AIAnalysisResult> {
   try {
     const config = getAIConfig()
@@ -30,7 +31,7 @@ export async function callAIAnalysis(
       return { success: false, error: 'AI配置未设置，请先在设置页面配置API Key' }
     }
 
-    const prompt = buildPromptFromTemplate(template, stocks, date)
+    const prompt = buildPromptFromTemplate(template, stocks, date, financeContext)
 
     let endpoint = ''
     let body: any = {}

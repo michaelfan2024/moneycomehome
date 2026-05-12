@@ -1,6 +1,9 @@
 import { Client } from 'pg'
+import { randomUUID } from 'crypto'
 import type { StockBatch, StockPoolItem, StockCompareResult, StockDetail, DashboardStats, StockStatus } from '../types'
 import { getCache, setCache, invalidateCache } from './cache'
+import type { ReportTemplateInput, ReportTemplateRecord } from './report-template'
+import type { EastmoneyFinanceSummary } from './eastmoney-finance'
 
 const databaseUrl = process.env.DATABASE_URL
 
@@ -93,12 +96,54 @@ export async function ensureTables(): Promise<void> {
           UNIQUE(trade_date, stock_code)
         )
       `)
+
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS report_templates (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          content TEXT NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS stock_financial_reports (
+          id SERIAL PRIMARY KEY,
+          stock_code TEXT NOT NULL,
+          stock_name TEXT NOT NULL,
+          org_type_code TEXT,
+          org_type TEXT,
+          report_date DATE NOT NULL,
+          report_type TEXT NOT NULL,
+          report_date_name TEXT,
+          notice_date DATE,
+          update_date DATE,
+          eps NUMERIC,
+          bps NUMERIC,
+          cash_per_share NUMERIC,
+          roe NUMERIC,
+          revenue_yoy NUMERIC,
+          net_profit_yoy NUMERIC,
+          gross_margin NUMERIC,
+          revenue NUMERIC,
+          total_profit NUMERIC,
+          net_profit NUMERIC,
+          source_url TEXT NOT NULL,
+          raw_payload JSONB NOT NULL,
+          fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(stock_code, report_date)
+        )
+      `)
       
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_pool_items_batch_id ON stock_pool_items(batch_id)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_pool_items_stock_code ON stock_pool_items(stock_code)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_compare_results_trade_date ON stock_compare_results(trade_date)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_compare_results_stock_code ON stock_compare_results(stock_code)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_compare_results_status ON stock_compare_results(status)')
+      await client.query('CREATE INDEX IF NOT EXISTS idx_report_templates_updated_at ON report_templates(updated_at DESC)')
+      await client.query('CREATE INDEX IF NOT EXISTS idx_stock_financial_reports_stock_code ON stock_financial_reports(stock_code)')
+      await client.query('CREATE INDEX IF NOT EXISTS idx_stock_financial_reports_report_date ON stock_financial_reports(report_date DESC)')
       
       tablesInitialized = true
       console.log('Database tables and indexes initialized')
@@ -489,5 +534,193 @@ export async function getContinuousRanking(minDays: number = 2): Promise<StockCo
   } catch (error) {
     console.error('Error getting continuous ranking:', error)
     return null
+  }
+}
+
+export async function getReportTemplates(): Promise<ReportTemplateRecord[] | null> {
+  try {
+    const client = await getClient()
+    const result = await client.query(`
+      SELECT
+        id,
+        name,
+        content,
+        created_at::TEXT as created_at,
+        updated_at::TEXT as updated_at
+      FROM report_templates
+      ORDER BY updated_at DESC, created_at DESC
+    `)
+    return result.rows
+  } catch (error) {
+    console.error('Error getting report templates:', error)
+    return null
+  }
+}
+
+export async function createReportTemplate(input: ReportTemplateInput): Promise<ReportTemplateRecord | null> {
+  try {
+    const client = await getClient()
+    const id = `report_template_${Date.now()}_${randomUUID().slice(0, 8)}`
+    const result = await client.query(
+      `INSERT INTO report_templates (id, name, content)
+       VALUES ($1, $2, $3)
+       RETURNING id, name, content, created_at::TEXT as created_at, updated_at::TEXT as updated_at`,
+      [id, input.name, input.content]
+    )
+    return result.rows[0] || null
+  } catch (error) {
+    console.error('Error creating report template:', error)
+    return null
+  }
+}
+
+export async function updateReportTemplate(id: string, input: ReportTemplateInput): Promise<ReportTemplateRecord | null> {
+  try {
+    const client = await getClient()
+    const result = await client.query(
+      `UPDATE report_templates
+       SET name = $2, content = $3, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1
+       RETURNING id, name, content, created_at::TEXT as created_at, updated_at::TEXT as updated_at`,
+      [id, input.name, input.content]
+    )
+    return result.rows[0] || null
+  } catch (error) {
+    console.error('Error updating report template:', error)
+    return null
+  }
+}
+
+export async function deleteReportTemplate(id: string): Promise<boolean> {
+  try {
+    const client = await getClient()
+    const result = await client.query('DELETE FROM report_templates WHERE id = $1', [id])
+    return (result.rowCount ?? 0) > 0
+  } catch (error) {
+    console.error('Error deleting report template:', error)
+    return false
+  }
+}
+
+export async function getLatestFinancialReport(stockCode: string): Promise<EastmoneyFinanceSummary | null> {
+  try {
+    const client = await getClient()
+    const result = await client.query(
+      `SELECT
+        stock_code as "stockCode",
+        stock_name as "stockName",
+        org_type_code as "orgTypeCode",
+        org_type as "orgType",
+        report_date::TEXT as "reportDate",
+        report_type as "reportType",
+        report_date_name as "reportDateName",
+        notice_date::TEXT as "noticeDate",
+        update_date::TEXT as "updateDate",
+        eps,
+        bps,
+        cash_per_share as "cashPerShare",
+        roe,
+        revenue_yoy as "revenueYoy",
+        net_profit_yoy as "netProfitYoy",
+        gross_margin as "grossMargin",
+        revenue,
+        total_profit as "totalProfit",
+        net_profit as "netProfit",
+        source_url as "sourceUrl",
+        raw_payload as raw
+      FROM stock_financial_reports
+      WHERE stock_code = $1
+      ORDER BY report_date DESC, fetched_at DESC
+      LIMIT 1`,
+      [stockCode]
+    )
+
+    return result.rows[0] || null
+  } catch (error) {
+    console.error('Error getting latest financial report:', error)
+    return null
+  }
+}
+
+export async function upsertFinancialReport(report: EastmoneyFinanceSummary): Promise<boolean> {
+  try {
+    const client = await getClient()
+    const result = await client.query(
+      `INSERT INTO stock_financial_reports (
+        stock_code,
+        stock_name,
+        org_type_code,
+        org_type,
+        report_date,
+        report_type,
+        report_date_name,
+        notice_date,
+        update_date,
+        eps,
+        bps,
+        cash_per_share,
+        roe,
+        revenue_yoy,
+        net_profit_yoy,
+        gross_margin,
+        revenue,
+        total_profit,
+        net_profit,
+        source_url,
+        raw_payload,
+        fetched_at
+      ) VALUES (
+        $1, $2, $3, $4, $5::date, $6, $7, $8::date, $9::date, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, CURRENT_TIMESTAMP
+      )
+      ON CONFLICT (stock_code, report_date) DO UPDATE SET
+        stock_name = EXCLUDED.stock_name,
+        org_type_code = EXCLUDED.org_type_code,
+        org_type = EXCLUDED.org_type,
+        report_type = EXCLUDED.report_type,
+        report_date_name = EXCLUDED.report_date_name,
+        notice_date = EXCLUDED.notice_date,
+        update_date = EXCLUDED.update_date,
+        eps = EXCLUDED.eps,
+        bps = EXCLUDED.bps,
+        cash_per_share = EXCLUDED.cash_per_share,
+        roe = EXCLUDED.roe,
+        revenue_yoy = EXCLUDED.revenue_yoy,
+        net_profit_yoy = EXCLUDED.net_profit_yoy,
+        gross_margin = EXCLUDED.gross_margin,
+        revenue = EXCLUDED.revenue,
+        total_profit = EXCLUDED.total_profit,
+        net_profit = EXCLUDED.net_profit,
+        source_url = EXCLUDED.source_url,
+        raw_payload = EXCLUDED.raw_payload,
+        fetched_at = CURRENT_TIMESTAMP`,
+      [
+        report.stockCode,
+        report.stockName,
+        report.orgTypeCode || null,
+        report.orgType || null,
+        report.reportDate,
+        report.reportType,
+        report.reportDateName || null,
+        report.noticeDate || null,
+        report.updateDate || null,
+        report.eps ?? null,
+        report.bps ?? null,
+        report.cashPerShare ?? null,
+        report.roe ?? null,
+        report.revenueYoy ?? null,
+        report.netProfitYoy ?? null,
+        report.grossMargin ?? null,
+        report.revenue ?? null,
+        report.totalProfit ?? null,
+        report.netProfit ?? null,
+        report.sourceUrl,
+        JSON.stringify(report.raw)
+      ]
+    )
+
+    return (result.rowCount ?? 0) > 0
+  } catch (error) {
+    console.error('Error upserting financial report:', error)
+    return false
   }
 }

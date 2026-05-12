@@ -12,6 +12,27 @@ export interface Report {
   createdAt: string
   publishedAt?: string
   publishedTo?: string
+  financeSources?: Array<{
+    stockCode: string
+    stockName: string
+    orgType?: string
+    reportPeriod: string
+    reportType: string
+    reportDateName?: string
+    noticeDate?: string
+    updateDate?: string
+    eps?: number | null
+    bps?: number | null
+    cashPerShare?: number | null
+    roe?: number | null
+    revenueYoy?: number | null
+    netProfitYoy?: number | null
+    grossMargin?: number | null
+    revenue?: number | null
+    totalProfit?: number | null
+    netProfit?: number | null
+    sourceUrl: string
+  }>
 }
 
 function ensureReportsDir() {

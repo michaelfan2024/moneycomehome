@@ -2,11 +2,12 @@ export interface AnalysisTemplate {
   id: string
   name: string
   description: string
-  role: string
-  corePrinciples: string
-  writingStyle: string
-  articleStructure: string
-  writingTips: string
+  role?: string
+  corePrinciples?: string
+  writingStyle?: string
+  articleStructure?: string
+  writingTips?: string
+  customPrompt?: string
 }
 
 export const DEFAULT_TEMPLATE: AnalysisTemplate = {
@@ -164,36 +165,59 @@ export const TEMPLATES: AnalysisTemplate[] = [
 export function buildPromptFromTemplate(
   template: AnalysisTemplate,
   stocks: any[],
-  date: string
+  date: string,
+  financeContext?: string
 ): string {
   const stockList = stocks.map(s => `${s.stock_code} ${s.stock_name}`).join('\n')
-  
-  let prompt = `${template.role}
-
-📅 **日期**：${date}
+  const stockContext = `📅 **日期**：${date}
 📈 **今日新增股票**：${stocks.length}只
 
 **股票列表：**
 ${stockList}
 
----
+---`
 
-${template.corePrinciples}
+  const financeSection = financeContext?.trim()
+    ? `\n\n${financeContext.trim()}`
+    : ''
+
+  if (template.customPrompt?.trim()) {
+    const customPrompt = template.customPrompt.trim()
+    return `${stockContext}
+
+请按照以下自定义模板撰写分析文章：
+
+${customPrompt}${financeSection}`
+      .replace(/\{\{DATE\}\}/g, date)
+      .replace(/\{\{STOCK_COUNT\}\}/g, String(stocks.length))
+  }
+
+  let prompt = `${template.role || ''}
+
+${stockContext}
+
+${template.corePrinciples || ''}
 
 ---
 
 请按照以下要求撰写分析文章：
 
-${template.writingStyle}
+${template.writingStyle || ''}
 
-${template.articleStructure}
+${template.articleStructure || ''}
 
-${template.writingTips}`
+${template.writingTips || ''}`
+
+  if (financeSection) {
+    prompt = `${prompt}
+
+${financeSection.trim()}`
+  }
 
   prompt = prompt
     .replace(/\{\{DATE\}\}/g, date)
     .replace(/\{\{STOCK_COUNT\}\}/g, String(stocks.length))
-  
+
   return prompt
 }
 

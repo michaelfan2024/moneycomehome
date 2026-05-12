@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { callAIAnalysis, DEFAULT_TEMPLATE } from '../../../../lib/ai-analysis'
 import { saveReport, type Report } from '../../../../lib/report-store'
 import type { AnalysisTemplate } from '../../../../lib/analysis-template'
+import { buildFinanceContext, fetchLatestEastmoneyFinanceSummary, toReportFinanceSource } from '../../../../lib/eastmoney-finance'
+import { getLatestFinancialReport, upsertFinancialReport } from '../../../../lib/db'
 
 export async function POST(request: Request) {
   try {
@@ -24,8 +26,27 @@ export async function POST(request: Request) {
       created_at: s.created_at || new Date().toISOString()
     }))
 
+    const financeSnapshots = await Promise.all(
+      stockResults.map(async (stock) => {
+        const fetched = await fetchLatestEastmoneyFinanceSummary(stock.stock_code)
+        if (fetched) {
+          await upsertFinancialReport(fetched)
+          return fetched
+        }
+
+        return await getLatestFinancialReport(stock.stock_code)
+      })
+    )
+
+    const financeContext = buildFinanceContext(
+      financeSnapshots.filter((item): item is NonNullable<typeof item> => Boolean(item))
+    )
+    const financeSources = financeSnapshots
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+      .map((item) => toReportFinanceSource(item))
+
     const selectedTemplate: AnalysisTemplate = template || DEFAULT_TEMPLATE
-    const aiResult = await callAIAnalysis(stockResults, date, selectedTemplate)
+    const aiResult = await callAIAnalysis(stockResults, date, selectedTemplate, financeContext)
 
     if (!aiResult.success || !aiResult.content) {
       return NextResponse.json({ success: false, error: aiResult.error }, { status: 500 })
@@ -37,7 +58,8 @@ export async function POST(request: Request) {
       title: `${date} 新增股票AI分析报告`,
       content: aiResult.content,
       stockCount: stockResults.length,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      financeSources
     }
 
     const saved = saveReport(report)

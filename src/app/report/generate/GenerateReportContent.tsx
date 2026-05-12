@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation'
 import { getCompareResults } from '../../../lib/api'
 import type { StockCompareResult } from '../../../types'
 import { TEMPLATES, DEFAULT_TEMPLATE, type AnalysisTemplate } from '../../../lib/analysis-template'
+import { reportTemplateRecordToAnalysisTemplate, type ReportTemplateRecord } from '../../../lib/report-template'
 import { THEMES, THEME_GROUPS } from '../../../lib/wechat-editor/themes'
 import { buildWechatEditorUrl, getSafeThemeId } from '../../../lib/wechat-editor/themeSelection'
 
@@ -19,7 +20,12 @@ export default function GenerateReportContent() {
   const [selectedTemplate, setSelectedTemplate] = useState<AnalysisTemplate>(DEFAULT_TEMPLATE)
   const [selectedWechatTheme, setSelectedWechatTheme] = useState(getSafeThemeId())
   const [showTemplateModal, setShowTemplateModal] = useState(false)
-  const [customTemplate, setCustomTemplate] = useState<AnalysisTemplate>({ ...DEFAULT_TEMPLATE })
+  const [customTemplates, setCustomTemplates] = useState<AnalysisTemplate[]>([])
+  const [templateLoading, setTemplateLoading] = useState(false)
+  const [templateError, setTemplateError] = useState<string | null>(null)
+  const [editingTemplateId, setEditingTemplateId] = useState<string | null>(null)
+  const [templateName, setTemplateName] = useState('')
+  const [templateContent, setTemplateContent] = useState('')
 
   const date = searchParams.get('date') || ''
   const count = searchParams.get('count') || '0'
@@ -33,6 +39,10 @@ export default function GenerateReportContent() {
     }
     fetchStocks()
   }, [date])
+
+  useEffect(() => {
+    fetchCustomTemplates()
+  }, [])
 
   const fetchStocks = async () => {
     setLoading(true)
@@ -59,11 +69,10 @@ export default function GenerateReportContent() {
     setProgress('正在调用AI分析...')
     try {
       setProgress('正在生成分析报告（预计30秒）...')
-      const templateToUse = selectedTemplate.id === 'custom' ? customTemplate : selectedTemplate
       const res = await fetch('/api/report/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date, stocks, template: templateToUse })
+        body: JSON.stringify({ date, stocks, template: selectedTemplate })
       })
       const data = await res.json()
       if (data.success) {
@@ -81,8 +90,115 @@ export default function GenerateReportContent() {
     }
   }
 
-  const handleSaveCustomTemplate = () => {
-    setSelectedTemplate({ ...customTemplate, id: 'custom', name: '自定义模板' })
+  const fetchCustomTemplates = async () => {
+    setTemplateLoading(true)
+    setTemplateError(null)
+    try {
+      const res = await fetch('/api/config/report-templates')
+      const data = await res.json()
+      if (!data.success) {
+        setTemplateError(data.error || '模板加载失败')
+        return
+      }
+
+      const templates = (data.data || []).map((template: ReportTemplateRecord) =>
+        reportTemplateRecordToAnalysisTemplate(template)
+      )
+      setCustomTemplates(templates)
+    } catch (err) {
+      setTemplateError('模板加载失败')
+    } finally {
+      setTemplateLoading(false)
+    }
+  }
+
+  const openNewTemplateModal = () => {
+    setEditingTemplateId(null)
+    setTemplateName('')
+    setTemplateContent('')
+    setTemplateError(null)
+    setShowTemplateModal(true)
+  }
+
+  const openEditTemplateModal = (template: AnalysisTemplate) => {
+    setEditingTemplateId(template.id)
+    setTemplateName(template.name)
+    setTemplateContent(template.customPrompt || '')
+    setTemplateError(null)
+    setShowTemplateModal(true)
+  }
+
+  const handleSaveCustomTemplate = async () => {
+    if (!templateName.trim() || !templateContent.trim()) {
+      setTemplateError('模板名称和内容不能为空')
+      return
+    }
+
+    setTemplateLoading(true)
+    setTemplateError(null)
+    try {
+      const payload = editingTemplateId
+        ? { id: editingTemplateId, name: templateName, content: templateContent }
+        : { name: templateName, content: templateContent }
+      const res = await fetch('/api/config/report-templates', {
+        method: editingTemplateId ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      const data = await res.json()
+
+      if (!data.success) {
+        setTemplateError(data.error || '模板保存失败')
+        return
+      }
+
+      const savedTemplate = reportTemplateRecordToAnalysisTemplate(data.data)
+      setCustomTemplates((templates) => {
+        if (editingTemplateId) {
+          return templates.map((template) => template.id === savedTemplate.id ? savedTemplate : template)
+        }
+        return [savedTemplate, ...templates]
+      })
+      setSelectedTemplate(savedTemplate)
+      setShowTemplateModal(false)
+    } catch (err) {
+      setTemplateError('模板保存失败')
+    } finally {
+      setTemplateLoading(false)
+    }
+  }
+
+  const handleDeleteCustomTemplate = async () => {
+    if (!editingTemplateId) return
+    if (!window.confirm('确定删除这个模板吗？')) return
+
+    setTemplateLoading(true)
+    setTemplateError(null)
+    try {
+      const res = await fetch(`/api/config/report-templates?id=${encodeURIComponent(editingTemplateId)}`, {
+        method: 'DELETE'
+      })
+      const data = await res.json()
+      if (!data.success) {
+        setTemplateError(data.error || data.message || '模板删除失败')
+        return
+      }
+
+      setCustomTemplates((templates) => templates.filter((template) => template.id !== editingTemplateId))
+      if (selectedTemplate.id === editingTemplateId) {
+        setSelectedTemplate(DEFAULT_TEMPLATE)
+      }
+      setShowTemplateModal(false)
+    } catch (err) {
+      setTemplateError('模板删除失败')
+    } finally {
+      setTemplateLoading(false)
+    }
+  }
+
+  const selectedTemplatePreview = selectedTemplate.customPrompt || selectedTemplate.writingStyle || ''
+
+  const closeTemplateModal = () => {
     setShowTemplateModal(false)
   }
 
@@ -186,14 +302,41 @@ export default function GenerateReportContent() {
                 <div className="text-xs text-[var(--text-secondary)]">{template.description}</div>
               </button>
             ))}
+            {customTemplates.map((template) => (
+              <div
+                key={template.id}
+                className={`flex min-w-[180px] items-stretch rounded-lg border transition-all ${
+                  selectedTemplate.id === template.id
+                    ? 'border-[var(--primary-color)] bg-[var(--primary-color)]/10'
+                    : 'border-[var(--border-color)] hover:border-[var(--primary-color)]'
+                }`}
+              >
+                <button
+                  onClick={() => setSelectedTemplate(template)}
+                  className="flex-1 px-4 py-3 text-left"
+                >
+                  <div className="font-medium text-sm">{template.name}</div>
+                  <div className="text-xs text-[var(--text-secondary)]">{template.description}</div>
+                </button>
+                <button
+                  onClick={() => openEditTemplateModal(template)}
+                  className="border-l border-[var(--border-color)] px-3 text-xs text-[var(--text-secondary)] hover:text-[var(--primary-color)]"
+                >
+                  编辑
+                </button>
+              </div>
+            ))}
             <button
-              onClick={() => setShowTemplateModal(true)}
+              onClick={openNewTemplateModal}
               className="px-4 py-3 rounded-lg border border-dashed border-[var(--border-color)] hover:border-[var(--primary-color)] transition-all"
             >
-              <div className="font-medium text-sm">自定义模板</div>
-              <div className="text-xs text-[var(--text-secondary)]">自己编写提示词</div>
+              <div className="font-medium text-sm">新建模板</div>
+              <div className="text-xs text-[var(--text-secondary)]">数据库同步</div>
             </button>
           </div>
+          {templateError && !showTemplateModal && (
+            <p className="mt-2 text-sm text-red-400">{templateError}</p>
+          )}
         </div>
 
         <div className="mb-6">
@@ -226,11 +369,11 @@ export default function GenerateReportContent() {
           </p>
         </div>
 
-        {selectedTemplate.id !== 'custom' && (
+        {selectedTemplatePreview && (
           <div className="bg-[var(--bg-secondary)] rounded-lg p-4 mb-6">
             <h4 className="font-medium mb-2">📋 当前模板预览</h4>
             <div className="text-sm text-[var(--text-secondary)] whitespace-pre-wrap max-h-32 overflow-y-auto">
-              {selectedTemplate.writingStyle}
+              {selectedTemplatePreview}
             </div>
           </div>
         )}
@@ -299,11 +442,11 @@ export default function GenerateReportContent() {
 
       {showTemplateModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-[var(--bg-card)] rounded-xl w-full max-w-2xl max-h-[80vh] overflow-y-auto">
+          <div className="bg-[var(--bg-card)] rounded-xl w-full max-w-3xl max-h-[85vh] overflow-y-auto">
             <div className="flex items-center justify-between p-4 border-b border-[var(--border-color)]">
-              <h3 className="font-medium">📝 自定义报告模板</h3>
+              <h3 className="font-medium">📝 {editingTemplateId ? '编辑报告模板' : '新建报告模板'}</h3>
               <button
-                onClick={() => setShowTemplateModal(false)}
+                onClick={closeTemplateModal}
                 className="text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
               >
                 ✕
@@ -311,63 +454,50 @@ export default function GenerateReportContent() {
             </div>
             <div className="p-4 space-y-4">
               <div>
-                <label className="block text-sm font-medium mb-2">角色设定</label>
-                <textarea
-                  value={customTemplate.role}
-                  onChange={(e) => setCustomTemplate({ ...customTemplate, role: e.target.value })}
-                  className="w-full h-24 px-4 py-2 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg text-sm resize-none"
-                  placeholder="输入AI的角色设定..."
+                <label className="block text-sm font-medium mb-2">模板名称</label>
+                <input
+                  value={templateName}
+                  onChange={(e) => setTemplateName(e.target.value)}
+                  className="w-full px-4 py-2 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg text-sm"
+                  placeholder="例如：D5 模板"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-2">核心投资理念</label>
+                <label className="block text-sm font-medium mb-2">模板内容</label>
                 <textarea
-                  value={customTemplate.corePrinciples}
-                  onChange={(e) => setCustomTemplate({ ...customTemplate, corePrinciples: e.target.value })}
-                  className="w-full h-32 px-4 py-2 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg text-sm resize-none"
-                  placeholder="输入核心投资理念声明..."
+                  value={templateContent}
+                  onChange={(e) => setTemplateContent(e.target.value)}
+                  className="w-full h-[420px] px-4 py-3 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg text-sm resize-y leading-relaxed"
+                  placeholder="粘贴角色设定、写作风格、文章结构、注意事项等完整模板内容。可使用 {{DATE}} 和 {{STOCK_COUNT}}。"
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium mb-2">写作风格要求</label>
-                <textarea
-                  value={customTemplate.writingStyle}
-                  onChange={(e) => setCustomTemplate({ ...customTemplate, writingStyle: e.target.value })}
-                  className="w-full h-24 px-4 py-2 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg text-sm resize-none"
-                  placeholder="输入写作风格要求..."
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-2">文章结构</label>
-                <textarea
-                  value={customTemplate.articleStructure}
-                  onChange={(e) => setCustomTemplate({ ...customTemplate, articleStructure: e.target.value })}
-                  className="w-full h-40 px-4 py-2 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg text-sm resize-none"
-                  placeholder="输入文章结构模板，可用 {{DATE}} 和 {{STOCK_COUNT}} 作为变量..."
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-2">写作提示</label>
-                <textarea
-                  value={customTemplate.writingTips}
-                  onChange={(e) => setCustomTemplate({ ...customTemplate, writingTips: e.target.value })}
-                  className="w-full h-24 px-4 py-2 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg text-sm resize-none"
-                  placeholder="输入写作提示..."
-                />
-              </div>
+              {templateError && (
+                <p className="text-sm text-red-400">{templateError}</p>
+              )}
             </div>
             <div className="flex gap-3 p-4 border-t border-[var(--border-color)]">
+              {editingTemplateId && (
+                <button
+                  onClick={handleDeleteCustomTemplate}
+                  disabled={templateLoading}
+                  className="px-4 py-2 border border-red-500/40 text-red-400 rounded-lg hover:bg-red-500/10 transition-colors disabled:opacity-60"
+                >
+                  删除
+                </button>
+              )}
               <button
-                onClick={() => setShowTemplateModal(false)}
+                onClick={closeTemplateModal}
+                disabled={templateLoading}
                 className="flex-1 px-4 py-2 border border-[var(--border-color)] rounded-lg hover:bg-[var(--bg-secondary)] transition-colors"
               >
                 取消
               </button>
               <button
                 onClick={handleSaveCustomTemplate}
-                className="flex-1 px-4 py-2 bg-[var(--primary-color)] text-black rounded-lg hover:bg-[var(--primary-dark)] transition-colors"
+                disabled={templateLoading}
+                className="flex-1 px-4 py-2 bg-[var(--primary-color)] text-black rounded-lg hover:bg-[var(--primary-dark)] transition-colors disabled:opacity-60"
               >
-                保存并使用
+                {templateLoading ? '保存中...' : '保存并使用'}
               </button>
             </div>
           </div>

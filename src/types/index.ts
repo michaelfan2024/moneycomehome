@@ -1,0 +1,58 @@
+export interface StockBatch {
+  id: string
+  batch_date: string
+  file_name: string
+  total_count: number
+  created_at: string
+}
+
+export interface StockPoolItem {
+  id: string
+  batch_id: string
+  trade_date: string
+  stock_code: string
+  stock_name: string
+  source?: string
+  note?: string
+  created_at: string
+}
+
+export type StockStatus = 'first_seen' | 'new' | 'continued' | 'removed' | 'reappeared'
+
+export interface StockCompareResult {
+  id: string
+  trade_date: string
+  stock_code: string
+  stock_name: string
+  status: StockStatus
+  continuous_count: number
+  total_appear_count: number
+  last_seen_date?: string
+  created_at: string
+}
+
+export interface StockDetail {
+  stock_code: string
+  stock_name: string
+  first_seen_date: string
+  last_seen_date: string
+  total_appear_count: number
+  current_continuous_count: number
+  break_count: number
+  appearance_dates: string[]
+}
+
+export interface DashboardStats {
+  today_count: number
+  today_new: number
+  today_removed: number
+  continuous_3d_count: number
+  continuous_5d_count: number
+}
+
+export interface CompareResult {
+  new_stocks: StockPoolItem[]
+  removed_stocks: StockPoolItem[]
+  continued_stocks: StockPoolItem[]
+  reappeared_stocks: StockPoolItem[]
+}

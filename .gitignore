@@ -1,0 +1,13 @@
+node_modules
+
+# Next.js build and dev artifacts
+.next/
+out/
+
+# Local runtime data and secrets
+.env*.local
+.config/
+.reports/
+
+# TypeScript incremental cache
+*.tsbuildinfo

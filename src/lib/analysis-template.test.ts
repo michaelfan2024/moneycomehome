@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_TEMPLATE, buildPromptFromTemplate, type AnalysisTemplate } from './analysis-template'
+import {
+  DEFAULT_TEMPLATE,
+  buildPromptFromTemplate,
+  getEditableTemplateContent,
+  isSystemTemplateId,
+  type AnalysisTemplate
+} from './analysis-template'
 
 describe('buildPromptFromTemplate', () => {
   it('uses a custom prompt as one block while keeping stock context', () => {
@@ -39,5 +45,43 @@ describe('buildPromptFromTemplate', () => {
 
     expect(prompt).toContain('东方财富公开财报数据')
     expect(prompt).toContain('14523000000')
+  })
+
+  it('keeps the default style readable in mobile WeChat output', () => {
+    const prompt = buildPromptFromTemplate(
+      DEFAULT_TEMPLATE,
+      [{ stock_code: '600110', stock_name: '诺德股份' }],
+      '2026-05-13'
+    )
+
+    expect(prompt).toContain('禁止把个股正文写成一级、二级或三级标题')
+    expect(prompt).toContain('正文不要整段加粗')
+    expect(prompt).toContain('每个自然段不超过80个中文字符')
+  })
+})
+
+describe('template editing helpers', () => {
+  it('recognizes built-in system templates by id', () => {
+    expect(isSystemTemplateId('default')).toBe(true)
+    expect(isSystemTemplateId('professional')).toBe(true)
+    expect(isSystemTemplateId('report_template_1')).toBe(false)
+  })
+
+  it('serializes a system template into editable full prompt content', () => {
+    const content = getEditableTemplateContent(DEFAULT_TEMPLATE)
+
+    expect(content).toContain('你是奶员外公众号的特约股票分析师')
+    expect(content).toContain('核心投资理念声明')
+    expect(content).toContain('文章结构')
+    expect(content).not.toContain('undefined')
+  })
+
+  it('uses custom prompt content directly when editing a saved override', () => {
+    expect(getEditableTemplateContent({
+      id: 'default',
+      name: '奶员外风格',
+      description: '覆盖模板',
+      customPrompt: '覆盖后的完整提示词'
+    })).toBe('覆盖后的完整提示词')
   })
 })

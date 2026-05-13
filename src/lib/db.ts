@@ -823,6 +823,26 @@ export async function updateReportTemplate(id: string, input: ReportTemplateInpu
   }
 }
 
+export async function upsertReportTemplate(id: string, input: ReportTemplateInput): Promise<ReportTemplateRecord | null> {
+  try {
+    const client = await getClient()
+    const result = await client.query(
+      `INSERT INTO report_templates (id, name, content)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (id) DO UPDATE
+       SET name = EXCLUDED.name,
+           content = EXCLUDED.content,
+           updated_at = CURRENT_TIMESTAMP
+       RETURNING id, name, content, created_at::TEXT as created_at, updated_at::TEXT as updated_at`,
+      [id, input.name, input.content]
+    )
+    return result.rows[0] || null
+  } catch (error) {
+    console.error('Error upserting report template:', error)
+    return null
+  }
+}
+
 export async function deleteReportTemplate(id: string): Promise<boolean> {
   try {
     const client = await getClient()

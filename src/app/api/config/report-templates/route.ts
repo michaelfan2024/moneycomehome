@@ -4,7 +4,7 @@ import {
   deleteReportTemplate,
   ensureTables,
   getReportTemplates,
-  updateReportTemplate
+  upsertReportTemplate
 } from '../../../../lib/db'
 import { normalizeReportTemplateInput } from '../../../../lib/report-template'
 
@@ -52,7 +52,7 @@ export async function PUT(request: Request) {
       return NextResponse.json({ success: false, error: '模板名称和内容不能为空' }, { status: 400 })
     }
 
-    const template = await updateReportTemplate(id, input)
+    const template = await upsertReportTemplate(id, input)
     if (!template) {
       return NextResponse.json({ success: false, error: '模板不存在或保存失败' }, { status: 404 })
     }

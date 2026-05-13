@@ -1,13 +1,39 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { getCompareResults } from '../../../lib/api'
 import type { StockCompareResult } from '../../../types'
-import { TEMPLATES, DEFAULT_TEMPLATE, type AnalysisTemplate } from '../../../lib/analysis-template'
+import {
+  TEMPLATES,
+  DEFAULT_TEMPLATE,
+  buildPromptFromTemplate,
+  getEditableTemplateContent,
+  isSystemTemplateId,
+  type AnalysisTemplate
+} from '../../../lib/analysis-template'
 import { reportTemplateRecordToAnalysisTemplate, type ReportTemplateRecord } from '../../../lib/report-template'
 import { THEMES, THEME_GROUPS } from '../../../lib/wechat-editor/themes'
 import { buildWechatEditorUrl, getSafeThemeId } from '../../../lib/wechat-editor/themeSelection'
+
+function getSystemBaseTemplate(id: string): AnalysisTemplate | undefined {
+  return TEMPLATES.find((template) => template.id === id)
+}
+
+function mergeSavedTemplate(record: ReportTemplateRecord): AnalysisTemplate {
+  const savedTemplate = reportTemplateRecordToAnalysisTemplate(record)
+  const baseTemplate = getSystemBaseTemplate(savedTemplate.id)
+
+  if (!baseTemplate) {
+    return savedTemplate
+  }
+
+  return {
+    ...baseTemplate,
+    name: savedTemplate.name,
+    customPrompt: savedTemplate.customPrompt
+  }
+}
 
 export default function GenerateReportContent() {
   const searchParams = useSearchParams()
@@ -20,16 +46,24 @@ export default function GenerateReportContent() {
   const [selectedTemplate, setSelectedTemplate] = useState<AnalysisTemplate>(DEFAULT_TEMPLATE)
   const [selectedWechatTheme, setSelectedWechatTheme] = useState(getSafeThemeId())
   const [showTemplateModal, setShowTemplateModal] = useState(false)
+  const [systemTemplateOverrides, setSystemTemplateOverrides] = useState<Record<string, AnalysisTemplate>>({})
   const [customTemplates, setCustomTemplates] = useState<AnalysisTemplate[]>([])
   const [templateLoading, setTemplateLoading] = useState(false)
   const [templateError, setTemplateError] = useState<string | null>(null)
   const [editingTemplateId, setEditingTemplateId] = useState<string | null>(null)
   const [templateName, setTemplateName] = useState('')
   const [templateContent, setTemplateContent] = useState('')
+  const [templateViewMode, setTemplateViewMode] = useState<'edit' | 'preview'>('edit')
 
   const date = searchParams.get('date') || ''
   const count = searchParams.get('count') || '0'
   const selectedWechatThemeDetails = THEMES.find((theme) => theme.id === selectedWechatTheme) || THEMES[0]
+  const systemTemplates = useMemo(
+    () => TEMPLATES.map((template) => systemTemplateOverrides[template.id] || template),
+    [systemTemplateOverrides]
+  )
+  const editingSystemTemplate = editingTemplateId ? isSystemTemplateId(editingTemplateId) : false
+  const editingSystemTemplateHasOverride = editingTemplateId ? Boolean(systemTemplateOverrides[editingTemplateId]) : false
 
   useEffect(() => {
     if (!date) {
@@ -101,10 +135,28 @@ export default function GenerateReportContent() {
         return
       }
 
-      const templates = (data.data || []).map((template: ReportTemplateRecord) =>
-        reportTemplateRecordToAnalysisTemplate(template)
-      )
-      setCustomTemplates(templates)
+      const templates: AnalysisTemplate[] = (data.data || []).map((template: ReportTemplateRecord) => mergeSavedTemplate(template))
+      const nextSystemOverrides: Record<string, AnalysisTemplate> = {}
+      const nextCustomTemplates: AnalysisTemplate[] = []
+
+      templates.forEach((template) => {
+        if (isSystemTemplateId(template.id)) {
+          nextSystemOverrides[template.id] = template
+        } else {
+          nextCustomTemplates.push(template)
+        }
+      })
+
+      setSystemTemplateOverrides(nextSystemOverrides)
+      setCustomTemplates(nextCustomTemplates)
+      setSelectedTemplate((currentTemplate) => {
+        if (nextSystemOverrides[currentTemplate.id]) {
+          return nextSystemOverrides[currentTemplate.id]
+        }
+
+        const customTemplate = nextCustomTemplates.find((template) => template.id === currentTemplate.id)
+        return customTemplate || currentTemplate
+      })
     } catch (err) {
       setTemplateError('模板加载失败')
     } finally {
@@ -116,6 +168,7 @@ export default function GenerateReportContent() {
     setEditingTemplateId(null)
     setTemplateName('')
     setTemplateContent('')
+    setTemplateViewMode('edit')
     setTemplateError(null)
     setShowTemplateModal(true)
   }
@@ -123,7 +176,8 @@ export default function GenerateReportContent() {
   const openEditTemplateModal = (template: AnalysisTemplate) => {
     setEditingTemplateId(template.id)
     setTemplateName(template.name)
-    setTemplateContent(template.customPrompt || '')
+    setTemplateContent(getEditableTemplateContent(template))
+    setTemplateViewMode('edit')
     setTemplateError(null)
     setShowTemplateModal(true)
   }
@@ -152,13 +206,20 @@ export default function GenerateReportContent() {
         return
       }
 
-      const savedTemplate = reportTemplateRecordToAnalysisTemplate(data.data)
-      setCustomTemplates((templates) => {
-        if (editingTemplateId) {
-          return templates.map((template) => template.id === savedTemplate.id ? savedTemplate : template)
-        }
-        return [savedTemplate, ...templates]
-      })
+      const savedTemplate = mergeSavedTemplate(data.data)
+      if (isSystemTemplateId(savedTemplate.id)) {
+        setSystemTemplateOverrides((templates) => ({
+          ...templates,
+          [savedTemplate.id]: savedTemplate
+        }))
+      } else {
+        setCustomTemplates((templates) => {
+          if (editingTemplateId) {
+            return templates.map((template) => template.id === savedTemplate.id ? savedTemplate : template)
+          }
+          return [savedTemplate, ...templates]
+        })
+      }
       setSelectedTemplate(savedTemplate)
       setShowTemplateModal(false)
     } catch (err) {
@@ -170,7 +231,11 @@ export default function GenerateReportContent() {
 
   const handleDeleteCustomTemplate = async () => {
     if (!editingTemplateId) return
-    if (!window.confirm('确定删除这个模板吗？')) return
+    const isSystemTemplate = isSystemTemplateId(editingTemplateId)
+    const confirmMessage = isSystemTemplate
+      ? '确定恢复这个系统模板的默认内容吗？'
+      : '确定删除这个模板吗？'
+    if (!window.confirm(confirmMessage)) return
 
     setTemplateLoading(true)
     setTemplateError(null)
@@ -184,9 +249,21 @@ export default function GenerateReportContent() {
         return
       }
 
-      setCustomTemplates((templates) => templates.filter((template) => template.id !== editingTemplateId))
+      if (isSystemTemplate) {
+        const baseTemplate = getSystemBaseTemplate(editingTemplateId)
+        setSystemTemplateOverrides((templates) => {
+          const nextTemplates = { ...templates }
+          delete nextTemplates[editingTemplateId]
+          return nextTemplates
+        })
+        if (selectedTemplate.id === editingTemplateId && baseTemplate) {
+          setSelectedTemplate(baseTemplate)
+        }
+      } else {
+        setCustomTemplates((templates) => templates.filter((template) => template.id !== editingTemplateId))
+      }
       if (selectedTemplate.id === editingTemplateId) {
-        setSelectedTemplate(DEFAULT_TEMPLATE)
+        setSelectedTemplate(isSystemTemplate ? getSystemBaseTemplate(editingTemplateId) || DEFAULT_TEMPLATE : DEFAULT_TEMPLATE)
       }
       setShowTemplateModal(false)
     } catch (err) {
@@ -196,7 +273,19 @@ export default function GenerateReportContent() {
     }
   }
 
-  const selectedTemplatePreview = selectedTemplate.customPrompt || selectedTemplate.writingStyle || ''
+  const selectedTemplatePreview = getEditableTemplateContent(selectedTemplate)
+  const draftTemplatePreview = templateContent.trim()
+    ? buildPromptFromTemplate(
+        {
+          id: editingTemplateId || 'draft',
+          name: templateName.trim() || '未命名模板',
+          description: '模板预览',
+          customPrompt: templateContent
+        },
+        stocks,
+        date || '{{DATE}}'
+      )
+    : ''
 
   const closeTemplateModal = () => {
     setShowTemplateModal(false)
@@ -288,19 +377,36 @@ export default function GenerateReportContent() {
         <div className="mb-6">
           <label className="block text-sm font-medium mb-3">📝 选择报告模板</label>
           <div className="flex flex-wrap gap-3">
-            {TEMPLATES.map((template) => (
-              <button
+            {systemTemplates.map((template) => (
+              <div
                 key={template.id}
-                onClick={() => setSelectedTemplate(template)}
-                className={`px-4 py-3 rounded-lg border transition-all ${
+                className={`flex min-w-[240px] items-stretch rounded-lg border transition-all ${
                   selectedTemplate.id === template.id
                     ? 'border-[var(--primary-color)] bg-[var(--primary-color)]/10'
                     : 'border-[var(--border-color)] hover:border-[var(--primary-color)]'
                 }`}
               >
-                <div className="font-medium text-sm">{template.name}</div>
-                <div className="text-xs text-[var(--text-secondary)]">{template.description}</div>
-              </button>
+                <button
+                  onClick={() => setSelectedTemplate(template)}
+                  className="flex-1 px-4 py-3 text-left"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-sm">{template.name}</span>
+                    {systemTemplateOverrides[template.id] && (
+                      <span className="rounded bg-[var(--primary-color)]/10 px-1.5 py-0.5 text-[10px] text-[var(--primary-color)]">
+                        已修改
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs text-[var(--text-secondary)]">{template.description}</div>
+                </button>
+                <button
+                  onClick={() => openEditTemplateModal(template)}
+                  className="border-l border-[var(--border-color)] px-3 text-xs text-[var(--text-secondary)] hover:text-[var(--primary-color)]"
+                >
+                  编辑
+                </button>
+              </div>
             ))}
             {customTemplates.map((template) => (
               <div
@@ -372,7 +478,7 @@ export default function GenerateReportContent() {
         {selectedTemplatePreview && (
           <div className="bg-[var(--bg-secondary)] rounded-lg p-4 mb-6">
             <h4 className="font-medium mb-2">📋 当前模板预览</h4>
-            <div className="text-sm text-[var(--text-secondary)] whitespace-pre-wrap max-h-32 overflow-y-auto">
+            <div className="text-sm leading-relaxed text-[var(--text-secondary)] whitespace-pre-wrap max-h-56 overflow-y-auto">
               {selectedTemplatePreview}
             </div>
           </div>
@@ -463,26 +569,58 @@ export default function GenerateReportContent() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-2">模板内容</label>
-                <textarea
-                  value={templateContent}
-                  onChange={(e) => setTemplateContent(e.target.value)}
-                  className="w-full h-[420px] px-4 py-3 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg text-sm resize-y leading-relaxed"
-                  placeholder="粘贴角色设定、写作风格、文章结构、注意事项等完整模板内容。可使用 {{DATE}} 和 {{STOCK_COUNT}}。"
-                />
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <label className="block text-sm font-medium">模板内容</label>
+                  <div className="flex overflow-hidden rounded-lg border border-[var(--border-color)] text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setTemplateViewMode('edit')}
+                      className={`px-3 py-1.5 ${
+                        templateViewMode === 'edit'
+                          ? 'bg-[var(--primary-color)] text-black'
+                          : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                      }`}
+                    >
+                      编辑
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTemplateViewMode('preview')}
+                      className={`border-l border-[var(--border-color)] px-3 py-1.5 ${
+                        templateViewMode === 'preview'
+                          ? 'bg-[var(--primary-color)] text-black'
+                          : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                      }`}
+                    >
+                      预览
+                    </button>
+                  </div>
+                </div>
+                {templateViewMode === 'edit' ? (
+                  <textarea
+                    value={templateContent}
+                    onChange={(e) => setTemplateContent(e.target.value)}
+                    className="w-full h-[420px] px-4 py-3 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg text-sm resize-y leading-relaxed"
+                    placeholder="粘贴角色设定、写作风格、文章结构、注意事项等完整模板内容。可使用 {{DATE}} 和 {{STOCK_COUNT}}。"
+                  />
+                ) : (
+                  <pre className="h-[420px] overflow-y-auto whitespace-pre-wrap rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-3 text-sm leading-relaxed text-[var(--text-secondary)]">
+                    {draftTemplatePreview || '填写模板内容后，这里会预览实际发送给 AI 的提示词。'}
+                  </pre>
+                )}
               </div>
               {templateError && (
                 <p className="text-sm text-red-400">{templateError}</p>
               )}
             </div>
             <div className="flex gap-3 p-4 border-t border-[var(--border-color)]">
-              {editingTemplateId && (
+              {editingTemplateId && (!editingSystemTemplate || editingSystemTemplateHasOverride) && (
                 <button
                   onClick={handleDeleteCustomTemplate}
                   disabled={templateLoading}
                   className="px-4 py-2 border border-red-500/40 text-red-400 rounded-lg hover:bg-red-500/10 transition-colors disabled:opacity-60"
                 >
-                  删除
+                  {editingSystemTemplate ? '恢复默认' : '删除'}
                 </button>
               )}
               <button

@@ -36,7 +36,14 @@ export const DEFAULT_TEMPLATE: AnalysisTemplate = {
 - 轻松幽默，像朋友聊天一样亲切
 - 穿插股票魔法师和陶博士的理念解读
 - 多用emoji和网络流行语
-- 结尾要有互动引导`,
+- 结尾要有互动引导
+
+### 📱 微信阅读排版硬性要求
+- 禁止把个股正文写成一级、二级或三级标题，标题只用于章节和个股名称
+- 正文不要整段加粗，只加粗股票名称、代码、关键数字和少量关键词
+- 每个自然段不超过80个中文字符，超过就拆成列表或短段
+- 每条列表控制在45个中文字符左右，避免一行塞进RPS、主营、基本面、技术面和风险
+- 个股分析必须拆成短条目，不能写成一大块黑粗长段落`,
   articleStructure: `### 📝 文章结构
 # 🚀 {{DATE}} 股票池更新速递｜{{STOCK_COUNT}}只潜力股来袭！
 
@@ -52,13 +59,15 @@ export const DEFAULT_TEMPLATE: AnalysisTemplate = {
 
 ## 三、潜力股深度剖析 💎
 - 精选3-5只最值得关注的股票
-- 每只股票用CAN SLIM维度分析：
-  - 🌟 **股票代码**：XXX
-  - 📈 **RPS评分**：（从技术面评估）
-  - 💼 **主营业务**：做什么的？
-  - 💰 **基本面亮点**：（业绩增长、净利润断层等）
-  - 🚀 **技术面信号**：（量价配合、趋势形态）
-  - ⚠️ **风险提示**：需要注意什么
+- 每只股票用独立小节，格式固定为：
+  ### 1. 股票名称（股票代码）
+  - 🌟 **一句话亮点**：先说最核心看点
+  - 📈 **RPS/强度**：用短句解释强弱
+  - 💼 **主营业务**：说明公司做什么
+  - 💰 **基本面**：列业绩、利润或景气度
+  - 🚀 **技术面**：列量价、平台或突破信号
+  - ⚠️ **风险**：单独列出主要风险
+- 每个字段单独成行，不要合并成长段
 
 ## 四、投资智慧分享 🧠
 - 结合股票魔法师理念谈今日选股思路
@@ -73,6 +82,8 @@ export const DEFAULT_TEMPLATE: AnalysisTemplate = {
 - 多使用小标题和列表
 - 适当加入表情符号
 - 结尾添加投资风险提示
+- 不要输出连续大字号文字，不要用标题语法承载正文内容
+- 如果某只股票信息很多，优先拆分为“亮点/数据/风险”三组短列表
 
 开始你的表演吧！🎉`
 }
@@ -161,6 +172,28 @@ export const TEMPLATES: AnalysisTemplate[] = [
 - 使用符号吸引注意`
   }
 ]
+
+export const SYSTEM_TEMPLATE_IDS = TEMPLATES.map((template) => template.id)
+
+export function isSystemTemplateId(id: string): boolean {
+  return SYSTEM_TEMPLATE_IDS.includes(id)
+}
+
+export function getEditableTemplateContent(template: AnalysisTemplate): string {
+  if (template.customPrompt?.trim()) {
+    return template.customPrompt.trim()
+  }
+
+  return [
+    template.role,
+    template.corePrinciples,
+    template.writingStyle,
+    template.articleStructure,
+    template.writingTips
+  ]
+    .filter((section): section is string => Boolean(section?.trim()))
+    .join('\n\n')
+}
 
 export function buildPromptFromTemplate(
   template: AnalysisTemplate,

@@ -1,9 +1,8 @@
 import { NextResponse } from 'next/server'
-import { ensureTables, getStockItemsByBatch, getLatestBatch } from '../../../../lib/db'
+import { getStockItemsByBatch, getLatestBatch } from '../../../../lib/db'
 
 export async function GET(request: Request) {
   try {
-    await ensureTables()
     const url = new URL(request.url)
     const batchId = url.searchParams.get('batchId')
     const groupId = url.searchParams.get('groupId')

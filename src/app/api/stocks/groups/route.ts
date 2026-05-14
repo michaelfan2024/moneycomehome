@@ -3,7 +3,6 @@ import { createStockGroup, ensureTables, getStockGroups, updateStockGroup } from
 
 export async function GET(request: Request) {
   try {
-    await ensureTables()
     const url = new URL(request.url)
     const includeInactive = url.searchParams.get('includeInactive') === 'true'
     const groups = await getStockGroups(includeInactive)

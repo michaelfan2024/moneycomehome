@@ -5,6 +5,7 @@ import { getCache, setCache, invalidateCache } from './cache'
 import type { ReportTemplateInput, ReportTemplateRecord } from './report-template'
 import type { EastmoneyFinanceSummary } from './eastmoney-finance'
 import type { ComparePageData, DashboardOverview } from './stocks-page-data'
+import { isStockGroupSchemaReady, type StockGroupSchemaReadiness } from './db-schema'
 
 const databaseUrl = process.env.DATABASE_URL
 export const DEFAULT_STOCK_GROUP_NAME = '每日火车股票池'
@@ -13,9 +14,14 @@ let pool: Pool | null = null
 let tablesInitialized = false
 let initializationPromise: Promise<void> | null = null
 let keepAliveTimer: ReturnType<typeof setInterval> | null = null
+let defaultGroupIdCache: string | null = null
 
 function normalizeGroupId(groupId?: string | number | null): string | undefined {
   return groupId === undefined || groupId === null || groupId === '' ? undefined : String(groupId)
+}
+
+function isMissingRelationError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: string }).code === '42P01'
 }
 
 function invalidateStockPageCaches(date?: string, groupId?: string | number | null): void {
@@ -29,11 +35,13 @@ function invalidateStockPageCaches(date?: string, groupId?: string | number | nu
   invalidateCache('groups_all')
   invalidateCache('dashboard_stats')
   invalidateCache('dashboard_overview_6')
+  invalidateCache('dashboard_overview_default_6')
   if (normalizedGroupId) {
     invalidateCache(`dashboard_stats_${normalizedGroupId}`)
     invalidateCache(`dashboard_overview_${normalizedGroupId}_6`)
   }
   invalidateCache('compare_page_data_latest')
+  invalidateCache('compare_page_data_default_latest')
   if (normalizedGroupId) {
     invalidateCache(`compare_page_data_${normalizedGroupId}_latest`)
   }
@@ -41,6 +49,7 @@ function invalidateStockPageCaches(date?: string, groupId?: string | number | nu
   if (normalizedDate) {
     invalidateCache(`compare_results_${normalizedDate}`)
     invalidateCache(`compare_page_data_${normalizedDate}`)
+    invalidateCache(`compare_page_data_default_${normalizedDate}`)
     if (normalizedGroupId) {
       invalidateCache(`compare_results_${normalizedGroupId}_${normalizedDate}`)
       invalidateCache(`compare_page_data_${normalizedGroupId}_${normalizedDate}`)
@@ -80,15 +89,7 @@ async function getClient(): Promise<Pool> {
     console.error('Idle database pool client error:', error)
   })
 
-  const pooledClient = await pool.connect()
-  try {
-    await pooledClient.query("SET client_encoding = 'UTF8'")
-    await pooledClient.query("SET NAMES 'UTF8'")
-  } finally {
-    pooledClient.release()
-  }
-
-  console.log('Database pool initialized with UTF-8 encoding')
+  console.log('Database pool initialized')
 
   if (!keepAliveTimer) {
     keepAliveTimer = setInterval(() => {
@@ -100,6 +101,98 @@ async function getClient(): Promise<Pool> {
   }
 
   return pool
+}
+
+async function getStockGroupSchemaReadiness(client: Pool): Promise<StockGroupSchemaReadiness> {
+  const metadataResult = await client.query(`
+    SELECT
+      (to_regclass('public.stock_groups') IS NOT NULL) as stock_groups_table_exists,
+      (to_regclass('public.stock_batches') IS NOT NULL) as stock_batches_table_exists,
+      (to_regclass('public.stock_pool_items') IS NOT NULL) as stock_pool_items_table_exists,
+      (to_regclass('public.stock_compare_results') IS NOT NULL) as stock_compare_results_table_exists,
+      (to_regclass('public.report_templates') IS NOT NULL) as report_templates_table_exists,
+      (to_regclass('public.stock_financial_reports') IS NOT NULL) as stock_financial_reports_table_exists,
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'stock_batches'
+          AND column_name = 'group_id'
+      ) as batch_group_column_exists,
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'stock_batches'
+          AND column_name = 'group_id'
+          AND is_nullable = 'NO'
+      ) as batch_group_column_required,
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'stock_compare_results'
+          AND column_name = 'batch_id'
+      ) as compare_batch_column_exists,
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'stock_compare_results'
+          AND column_name = 'batch_id'
+          AND is_nullable = 'NO'
+      ) as compare_batch_column_required,
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'stock_compare_results'
+          AND column_name = 'group_id'
+      ) as compare_group_column_exists,
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'stock_compare_results'
+          AND column_name = 'group_id'
+          AND is_nullable = 'NO'
+      ) as compare_group_column_required,
+      EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'stock_batches_group_date_key'
+      ) as batch_group_date_constraint_exists,
+      EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'stock_compare_results_batch_code_key'
+      ) as compare_batch_code_constraint_exists
+  `)
+
+  const metadata = metadataResult.rows[0]
+  let defaultGroupExists = false
+
+  if (metadata.stock_groups_table_exists) {
+    const defaultGroupResult = await client.query(
+      'SELECT EXISTS (SELECT 1 FROM stock_groups WHERE name = $1) as default_group_exists',
+      [DEFAULT_STOCK_GROUP_NAME]
+    )
+    defaultGroupExists = Boolean(defaultGroupResult.rows[0]?.default_group_exists)
+  }
+
+  return {
+    stock_groups_table_exists: Boolean(metadata.stock_groups_table_exists),
+    stock_batches_table_exists: Boolean(metadata.stock_batches_table_exists),
+    stock_pool_items_table_exists: Boolean(metadata.stock_pool_items_table_exists),
+    stock_compare_results_table_exists: Boolean(metadata.stock_compare_results_table_exists),
+    report_templates_table_exists: Boolean(metadata.report_templates_table_exists),
+    stock_financial_reports_table_exists: Boolean(metadata.stock_financial_reports_table_exists),
+    default_group_exists: defaultGroupExists,
+    batch_group_column_exists: Boolean(metadata.batch_group_column_exists),
+    batch_group_column_required: Boolean(metadata.batch_group_column_required),
+    compare_batch_column_exists: Boolean(metadata.compare_batch_column_exists),
+    compare_batch_column_required: Boolean(metadata.compare_batch_column_required),
+    compare_group_column_exists: Boolean(metadata.compare_group_column_exists),
+    compare_group_column_required: Boolean(metadata.compare_group_column_required),
+    batch_group_date_constraint_exists: Boolean(metadata.batch_group_date_constraint_exists),
+    compare_batch_code_constraint_exists: Boolean(metadata.compare_batch_code_constraint_exists)
+  }
 }
 
 export async function ensureTables(): Promise<void> {
@@ -115,6 +208,12 @@ export async function ensureTables(): Promise<void> {
   initializationPromise = (async () => {
     try {
       const client = await getClient()
+      const readiness = await getStockGroupSchemaReadiness(client)
+      if (isStockGroupSchemaReady(readiness)) {
+        tablesInitialized = true
+        console.log('Database schema already initialized')
+        return
+      }
 
       await client.query(`
         CREATE TABLE IF NOT EXISTS stock_groups (
@@ -290,7 +389,6 @@ export async function ensureTables(): Promise<void> {
 
 export async function getDefaultGroup(): Promise<StockGroup | null> {
   try {
-    await ensureTables()
     const client = await getClient()
     const result = await client.query(
       `SELECT id::text as id, name, is_active, created_at::text as created_at, updated_at::text as updated_at
@@ -299,8 +397,15 @@ export async function getDefaultGroup(): Promise<StockGroup | null> {
        LIMIT 1`,
       [DEFAULT_STOCK_GROUP_NAME]
     )
+    if (result.rows[0]?.id) {
+      defaultGroupIdCache = result.rows[0].id
+    }
     return result.rows[0] || null
   } catch (error) {
+    if (isMissingRelationError(error)) {
+      await ensureTables()
+      return getDefaultGroup()
+    }
     console.error('Error getting default group:', error)
     return null
   }
@@ -308,7 +413,6 @@ export async function getDefaultGroup(): Promise<StockGroup | null> {
 
 export async function resolveGroupId(groupId?: string | number | null): Promise<string | null> {
   try {
-    await ensureTables()
     const client = await getClient()
     const normalizedGroupId = normalizeGroupId(groupId)
 
@@ -319,9 +423,23 @@ export async function resolveGroupId(groupId?: string | number | null): Promise<
       }
     }
 
+    if (defaultGroupIdCache) {
+      return defaultGroupIdCache
+    }
+
     const defaultGroup = await getDefaultGroup()
+    if (!defaultGroup) {
+      await ensureTables()
+      const initializedDefaultGroup = await getDefaultGroup()
+      return initializedDefaultGroup?.id || null
+    }
+
     return defaultGroup?.id || null
   } catch (error) {
+    if (isMissingRelationError(error)) {
+      await ensureTables()
+      return resolveGroupId(groupId)
+    }
     console.error('Error resolving group id:', error)
     return null
   }
@@ -335,7 +453,6 @@ export async function getStockGroups(includeInactive: boolean = false): Promise<
   }
 
   try {
-    await ensureTables()
     const client = await getClient()
     const result = await client.query(
       `
@@ -349,6 +466,10 @@ export async function getStockGroups(includeInactive: boolean = false): Promise<
     setCache(cacheKey, result.rows)
     return result.rows
   } catch (error) {
+    if (isMissingRelationError(error)) {
+      await ensureTables()
+      return getStockGroups(includeInactive)
+    }
     console.error('Error getting stock groups:', error)
     return null
   }
@@ -374,6 +495,9 @@ export async function createStockGroup(name: string): Promise<StockGroup | null>
       `,
       [trimmedName]
     )
+    if (result.rows[0]?.name === DEFAULT_STOCK_GROUP_NAME) {
+      defaultGroupIdCache = result.rows[0].id
+    }
     invalidateStockPageCaches()
     return result.rows[0] || null
   } catch (error) {
@@ -415,6 +539,11 @@ export async function updateStockGroup(
       `,
       [groupId, nextName, nextActive]
     )
+    if (result.rows[0]?.name === DEFAULT_STOCK_GROUP_NAME) {
+      defaultGroupIdCache = result.rows[0].id
+    } else if (String(groupId) === defaultGroupIdCache) {
+      defaultGroupIdCache = null
+    }
     invalidateStockPageCaches(undefined, groupId)
     return result.rows[0] || null
   } catch (error) {
@@ -566,6 +695,10 @@ export async function getStockItemsByBatch(batchId: number): Promise<StockPoolIt
     
     return result.rows
   } catch (error) {
+    if (isMissingRelationError(error)) {
+      await ensureTables()
+      return getStockItemsByBatch(batchId)
+    }
     console.error('Error getting stock items:', error)
     return null
   }
@@ -595,6 +728,10 @@ export async function getLatestBatch(groupId?: string | number | null): Promise<
     )
     return result.rows[0] || null
   } catch (error) {
+    if (isMissingRelationError(error)) {
+      await ensureTables()
+      return getLatestBatch(groupId)
+    }
     console.error('Error getting latest batch:', error)
     return null
   }
@@ -653,11 +790,11 @@ const emptyDashboardStats: DashboardStats = {
 }
 
 export async function getDashboardOverview(recentLimit: number = 6, groupId?: string | number | null): Promise<DashboardOverview | null> {
-  const resolvedGroupId = await resolveGroupId(groupId)
-  if (!resolvedGroupId) {
-    return null
-  }
-  const cacheKey = `dashboard_overview_${resolvedGroupId}_${recentLimit}`
+  const normalizedGroupId = normalizeGroupId(groupId)
+  const cachedDefaultGroupId = normalizedGroupId ? null : defaultGroupIdCache
+  const cacheKey = cachedDefaultGroupId
+    ? `dashboard_overview_${cachedDefaultGroupId}_${recentLimit}`
+    : `dashboard_overview_${normalizedGroupId || 'default'}_${recentLimit}`
   const cached = getCache<DashboardOverview>(cacheKey)
   if (cached) {
     return cached
@@ -665,13 +802,42 @@ export async function getDashboardOverview(recentLimit: number = 6, groupId?: st
 
   try {
     const client = await getClient()
-    const groups = await getStockGroups(false) || []
     const result = await client.query(
       `
-      WITH latest_batch AS (
+      WITH active_groups AS (
+        SELECT COALESCE(json_agg(row_to_json(group_row)), '[]'::json) as groups
+        FROM (
+          SELECT id::text as id, name, is_active, created_at::text as created_at, updated_at::text as updated_at
+          FROM stock_groups
+          WHERE is_active = TRUE
+          ORDER BY is_active DESC, created_at ASC, name ASC
+        ) group_row
+      ),
+      requested_group AS (
+        SELECT id, id::text as id_text
+        FROM stock_groups
+        WHERE $2::text IS NOT NULL
+          AND id::text = $2::text
+        LIMIT 1
+      ),
+      default_group AS (
+        SELECT id, id::text as id_text
+        FROM stock_groups
+        WHERE name = $3
+        LIMIT 1
+      ),
+      selected_group AS (
+        SELECT id, id_text FROM requested_group
+        UNION ALL
+        SELECT id, id_text
+        FROM default_group
+        WHERE NOT EXISTS (SELECT 1 FROM requested_group)
+        LIMIT 1
+      ),
+      latest_batch AS (
         SELECT id, batch_date
         FROM stock_batches
-        WHERE group_id = $2
+        WHERE group_id = (SELECT id FROM selected_group)
         ORDER BY batch_date DESC
         LIMIT 1
       ),
@@ -684,7 +850,7 @@ export async function getDashboardOverview(recentLimit: number = 6, groupId?: st
           COALESCE(SUM(CASE WHEN continuous_count >= 5 THEN 1 ELSE 0 END), 0)::int as continuous_5d_count
         FROM stock_compare_results
         WHERE batch_id = (SELECT id FROM latest_batch)
-          AND group_id = $2
+          AND group_id = (SELECT id FROM selected_group)
       ),
       recent_batches AS (
         SELECT COALESCE(json_agg(row_to_json(batch_row)), '[]'::json) as batches
@@ -697,17 +863,19 @@ export async function getDashboardOverview(recentLimit: number = 6, groupId?: st
             total_count,
             created_at::text as created_at
           FROM stock_batches
-          WHERE group_id = $2
+          WHERE group_id = (SELECT id FROM selected_group)
           ORDER BY batch_date DESC
-          LIMIT $1
+          LIMIT $1::int
         ) batch_row
       ),
       batch_count AS (
         SELECT COUNT(*)::int as total_batch_count
         FROM stock_batches
-        WHERE group_id = $2
+        WHERE group_id = (SELECT id FROM selected_group)
       )
       SELECT
+        (SELECT groups FROM active_groups) as groups,
+        (SELECT id_text FROM selected_group) as selected_group_id,
         stats.today_count,
         stats.today_new,
         stats.today_removed,
@@ -719,10 +887,19 @@ export async function getDashboardOverview(recentLimit: number = 6, groupId?: st
       CROSS JOIN recent_batches
       CROSS JOIN batch_count
       `,
-      [recentLimit, resolvedGroupId]
+      [recentLimit, normalizedGroupId || null, DEFAULT_STOCK_GROUP_NAME]
     )
 
     const row = result.rows[0]
+    const selectedGroupId = row?.selected_group_id || ''
+    const groups = row?.groups || []
+    if (!selectedGroupId) {
+      return null
+    }
+    if (!normalizedGroupId) {
+      defaultGroupIdCache = selectedGroupId
+    }
+    setCache('groups_active', groups)
     const overview: DashboardOverview = {
       stats: row ? {
         today_count: Number(row.today_count) || 0,
@@ -734,25 +911,32 @@ export async function getDashboardOverview(recentLimit: number = 6, groupId?: st
       batches: row?.batches || [],
       totalBatchCount: Number(row?.total_batch_count) || 0,
       groups,
-      selectedGroupId: resolvedGroupId
+      selectedGroupId
     }
 
-    setCache(cacheKey, overview)
+    setCache(`dashboard_overview_${selectedGroupId}_${recentLimit}`, overview)
+    if (cacheKey !== `dashboard_overview_${selectedGroupId}_${recentLimit}`) {
+      setCache(cacheKey, overview)
+    }
     return overview
   } catch (error) {
+    if (isMissingRelationError(error)) {
+      await ensureTables()
+      return getDashboardOverview(recentLimit, groupId)
+    }
     console.error('Error getting dashboard overview:', error)
     return null
   }
 }
 
 export async function getComparePageData(requestedDate?: string | null, groupId?: string | number | null): Promise<ComparePageData | null> {
-  const resolvedGroupId = await resolveGroupId(groupId)
-  if (!resolvedGroupId) {
-    return null
-  }
+  const normalizedGroupId = normalizeGroupId(groupId)
   const normalizedDate = requestedDate?.split('T')[0]
   const safeDate = normalizedDate && /^\d{4}-\d{2}-\d{2}$/.test(normalizedDate) ? normalizedDate : null
-  const cacheKey = `compare_page_data_${resolvedGroupId}_${safeDate || 'latest'}`
+  const cachedDefaultGroupId = normalizedGroupId ? null : defaultGroupIdCache
+  const cacheKey = cachedDefaultGroupId
+    ? `compare_page_data_${cachedDefaultGroupId}_${safeDate || 'latest'}`
+    : `compare_page_data_${normalizedGroupId || 'default'}_${safeDate || 'latest'}`
   const cached = getCache<ComparePageData>(cacheKey)
   if (cached) {
     return cached
@@ -760,12 +944,42 @@ export async function getComparePageData(requestedDate?: string | null, groupId?
 
   try {
     const client = await getClient()
-    const groups = await getStockGroups(false) || []
     const result = await client.query(
       `
-      WITH batches AS (
+      WITH active_groups AS (
+        SELECT COALESCE(json_agg(row_to_json(group_row)), '[]'::json) as groups
+        FROM (
+          SELECT id::text as id, name, is_active, created_at::text as created_at, updated_at::text as updated_at
+          FROM stock_groups
+          WHERE is_active = TRUE
+          ORDER BY is_active DESC, created_at ASC, name ASC
+        ) group_row
+      ),
+      requested_group AS (
+        SELECT id, id::text as id_text
+        FROM stock_groups
+        WHERE $1::text IS NOT NULL
+          AND id::text = $1::text
+        LIMIT 1
+      ),
+      default_group AS (
+        SELECT id, id::text as id_text
+        FROM stock_groups
+        WHERE name = $2
+        LIMIT 1
+      ),
+      selected_group AS (
+        SELECT id, id_text FROM requested_group
+        UNION ALL
+        SELECT id, id_text
+        FROM default_group
+        WHERE NOT EXISTS (SELECT 1 FROM requested_group)
+        LIMIT 1
+      ),
+      batches AS (
         SELECT
-          id::text as id,
+          id,
+          id::text as id_text,
           group_id::text as group_id,
           batch_date::text as batch_date,
           batch_date as raw_batch_date,
@@ -773,34 +987,42 @@ export async function getComparePageData(requestedDate?: string | null, groupId?
           total_count,
           created_at::text as created_at
         FROM stock_batches
-        WHERE group_id = $2
-        ORDER BY batch_date DESC
-      ),
-      selected_batch AS (
-        SELECT
-          selected.id,
-          selected.raw_batch_date as batch_date
-        FROM (
-          SELECT * FROM batches WHERE raw_batch_date = $1::date LIMIT 1
-        ) selected
-        UNION ALL
-        SELECT fallback.id, fallback.raw_batch_date
-        FROM (
-          SELECT * FROM batches LIMIT 1
-        ) fallback
-        WHERE NOT EXISTS (SELECT 1 FROM batches WHERE raw_batch_date = $1::date)
-        LIMIT 1
+        WHERE group_id = (SELECT id FROM selected_group)
       ),
       batch_json AS (
         SELECT COALESCE(json_agg(row_to_json(batch_row)), '[]'::json) as batches
         FROM (
-          SELECT id, batch_date, file_name, total_count, created_at
+          SELECT id_text as id, group_id, batch_date, file_name, total_count, created_at
           FROM batches
+          ORDER BY raw_batch_date DESC
         ) batch_row
-      ),
-      result_json AS (
-        SELECT COALESCE(json_agg(row_to_json(result_row)), '[]'::json) as results
-        FROM (
+      )
+      SELECT
+        (SELECT groups FROM active_groups) as groups,
+        (SELECT id_text FROM selected_group) as selected_group_id,
+        (SELECT batches FROM batch_json) as batches
+      `,
+      [normalizedGroupId || null, DEFAULT_STOCK_GROUP_NAME]
+    )
+
+    const row = result.rows[0]
+    const selectedGroupId = row?.selected_group_id || ''
+    if (!selectedGroupId) {
+      return null
+    }
+    if (!normalizedGroupId) {
+      defaultGroupIdCache = selectedGroupId
+    }
+    const groups = row?.groups || []
+    setCache('groups_active', groups)
+    const batches = row?.batches || []
+    const selectedBatch = safeDate
+      ? batches.find((batch: StockBatch) => batch.batch_date.split('T')[0] === safeDate) || batches[0]
+      : batches[0]
+
+    const compareResult = selectedBatch
+      ? await client.query(
+        `
           SELECT
             id::text as id,
             batch_id::text as batch_id,
@@ -814,33 +1036,32 @@ export async function getComparePageData(requestedDate?: string | null, groupId?
             last_seen_date::text as last_seen_date,
             created_at::text as created_at
           FROM stock_compare_results
-          WHERE batch_id = (SELECT id::int FROM selected_batch)
+          WHERE batch_id = $1
             AND group_id = $2
           ORDER BY status, stock_code
-        ) result_row
+        `,
+        [selectedBatch.id, selectedGroupId]
       )
-      SELECT
-        batch_json.batches,
-        COALESCE((SELECT batch_date::text FROM selected_batch), '') as selected_date,
-        result_json.results
-      FROM batch_json
-      CROSS JOIN result_json
-      `,
-      [safeDate, resolvedGroupId]
-    )
+      : { rows: [] }
 
-    const row = result.rows[0]
     const pageData: ComparePageData = {
       groups,
-      selectedGroupId: resolvedGroupId,
-      batches: row?.batches || [],
-      selectedDate: row?.selected_date || '',
-      results: row?.results || []
+      selectedGroupId,
+      batches,
+      selectedDate: selectedBatch?.batch_date || '',
+      results: compareResult.rows || []
     }
 
-    setCache(cacheKey, pageData)
+    setCache(`compare_page_data_${selectedGroupId}_${safeDate || 'latest'}`, pageData)
+    if (cacheKey !== `compare_page_data_${selectedGroupId}_${safeDate || 'latest'}`) {
+      setCache(cacheKey, pageData)
+    }
     return pageData
   } catch (error) {
+    if (isMissingRelationError(error)) {
+      await ensureTables()
+      return getComparePageData(requestedDate, groupId)
+    }
     console.error('Error getting compare page data:', error)
     return null
   }
@@ -1060,6 +1281,10 @@ export async function getStockDetail(stockCode: string, groupId?: string | numbe
       appearance_dates: appearanceDates
     }
   } catch (error) {
+    if (isMissingRelationError(error)) {
+      await ensureTables()
+      return getStockDetail(stockCode, groupId)
+    }
     console.error('Error getting stock detail:', error)
     return null
   }

@@ -3,17 +3,23 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'next/navigation'
 import StockTable from '../../components/StockTable'
-import { getRanking } from '../../lib/api'
-import type { StockCompareResult } from '../../types'
+import { getRanking, getStockGroups } from '../../lib/api'
+import type { StockCompareResult, StockGroup } from '../../types'
 
 export default function RankingContent() {
   const searchParams = useSearchParams()
+  const [groups, setGroups] = useState<StockGroup[]>([])
+  const [selectedGroupId, setSelectedGroupId] = useState('')
   const [results, setResults] = useState<StockCompareResult[]>([])
   const [minDays, setMinDays] = useState(2)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     const urlMinDays = searchParams.get('minDays')
+    const urlGroupId = searchParams.get('groupId')
+    if (urlGroupId) {
+      setSelectedGroupId(urlGroupId)
+    }
     if (urlMinDays) {
       const parsed = parseInt(urlMinDays, 10)
       if (!isNaN(parsed) && parsed >= 2) {
@@ -23,10 +29,21 @@ export default function RankingContent() {
   }, [searchParams])
 
   useEffect(() => {
+    const fetchGroups = async () => {
+      const result = await getStockGroups()
+      const nextGroups = result.data || []
+      setGroups(nextGroups)
+      setSelectedGroupId((current) => current || nextGroups[0]?.id || '')
+    }
+
+    fetchGroups()
+  }, [])
+
+  useEffect(() => {
     const fetchData = async () => {
       setLoading(true)
       try {
-        const result = await getRanking(minDays)
+        const result = await getRanking(minDays, selectedGroupId || undefined)
         setResults(result.data || [])
       } catch (error) {
         console.error('Error fetching ranking:', error)
@@ -36,7 +53,7 @@ export default function RankingContent() {
     }
 
     fetchData()
-  }, [minDays])
+  }, [minDays, selectedGroupId])
 
   const minDaysOptions = [
     { value: 2, label: '2天及以上' },
@@ -69,6 +86,19 @@ export default function RankingContent() {
 
       <div className="card p-4">
         <div className="flex flex-wrap gap-4 items-center">
+          <div>
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">分组</label>
+            <select
+              value={selectedGroupId}
+              onChange={(e) => setSelectedGroupId(e.target.value)}
+              className="select-field w-auto"
+            >
+              {groups.map((group) => (
+                <option key={group.id} value={group.id}>{group.name}</option>
+              ))}
+            </select>
+          </div>
+
           <div>
             <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">筛选条件</label>
             <select
@@ -117,6 +147,7 @@ export default function RankingContent() {
         data={results}
         columns={['stock_code', 'stock_name', 'continuous_count', 'total_appear_count']}
         showActions
+        groupId={selectedGroupId}
       />
     </div>
   )

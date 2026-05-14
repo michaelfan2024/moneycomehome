@@ -1,14 +1,16 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { useParams, useRouter } from 'next/navigation'
+import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { getStockDetail } from '../../../lib/api'
 import type { StockDetail } from '../../../types'
 
 export default function StockDetailPage() {
   const params = useParams()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const stockCode = params.code as string
+  const groupId = searchParams.get('groupId') || undefined
   const [detail, setDetail] = useState<StockDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -17,7 +19,7 @@ export default function StockDetailPage() {
     const fetchData = async () => {
       setLoading(true)
       try {
-        const result = await getStockDetail(stockCode)
+        const result = await getStockDetail(stockCode, groupId)
         if (result.data) {
           setDetail(result.data)
           setError('')
@@ -35,7 +37,7 @@ export default function StockDetailPage() {
     if (stockCode) {
       fetchData()
     }
-  }, [stockCode])
+  }, [stockCode, groupId])
 
   if (loading) {
     return (

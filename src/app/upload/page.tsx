@@ -1,10 +1,14 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { Suspense, useState, useCallback, useEffect } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { parseExcelFile, parseCsvFile, parseTextData, ParsedStock } from '../../lib/parser'
-import { uploadStockData, uploadStockDataByText } from '../../lib/api'
+import { createStockGroup, getStockGroups, uploadStockData, uploadStockDataByText } from '../../lib/api'
+import type { StockGroup } from '../../types'
 
-export default function UploadPage() {
+function UploadContent() {
+  const searchParams = useSearchParams()
+  const requestedGroupId = searchParams.get('groupId')
   const [selectedDate, setSelectedDate] = useState('')
   const [uploadedFile, setUploadedFile] = useState<File | null>(null)
   const [parsedData, setParsedData] = useState<ParsedStock[]>([])
@@ -15,6 +19,23 @@ export default function UploadPage() {
   const [parseStatus, setParseStatus] = useState<'idle' | 'parsing' | 'success' | 'failed'>('idle')
   const [inputText, setInputText] = useState('')
   const [useTextMode, setUseTextMode] = useState(false)
+  const [groups, setGroups] = useState<StockGroup[]>([])
+  const [selectedGroupId, setSelectedGroupId] = useState('')
+
+  const loadGroups = useCallback(async () => {
+    try {
+      const result = await getStockGroups()
+      const nextGroups = result.data || []
+      setGroups(nextGroups)
+      setSelectedGroupId((current) => current || nextGroups.find((group) => group.id === requestedGroupId)?.id || nextGroups[0]?.id || '')
+    } catch (error) {
+      console.error('Failed to load groups:', error)
+    }
+  }, [requestedGroupId])
+
+  useEffect(() => {
+    loadGroups()
+  }, [loadGroups])
 
   const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -87,8 +108,8 @@ export default function UploadPage() {
   }, [])
 
   const handleImport = useCallback(async () => {
-    if (!selectedDate || parsedData.length === 0) {
-      setError('请选择日期并上传有效数据')
+    if (!selectedGroupId || !selectedDate || parsedData.length === 0) {
+      setError('请选择分组、日期并上传有效数据')
       return
     }
 
@@ -99,21 +120,20 @@ export default function UploadPage() {
     try {
       let result
       if (useTextMode) {
-        result = await uploadStockDataByText(selectedDate, inputText)
+        result = await uploadStockDataByText(selectedDate, inputText, selectedGroupId)
       } else {
         if (!uploadedFile) {
           setError('请上传文件或使用文本粘贴功能')
           setIsImporting(false)
           return
         }
-        result = await uploadStockData(selectedDate, uploadedFile)
+        result = await uploadStockData(selectedDate, uploadedFile, selectedGroupId)
       }
       
       if (result.success) {
         setImportResult(`成功导入 ${result.count} 只股票！`)
         setParsedData([])
         setUploadedFile(null)
-        setSelectedDate('')
         setIsPreviewing(false)
         setParseStatus('idle')
         setInputText('')
@@ -126,9 +146,22 @@ export default function UploadPage() {
     } finally {
       setIsImporting(false)
     }
-  }, [selectedDate, parsedData, uploadedFile, useTextMode, inputText])
+  }, [selectedGroupId, selectedDate, parsedData, uploadedFile, useTextMode, inputText])
 
-  const canSubmit = selectedDate && parsedData.length > 0 && !isImporting
+  const handleCreateGroup = useCallback(async () => {
+    const name = window.prompt('请输入新分组名称')
+    if (!name?.trim()) return
+
+    const result = await createStockGroup(name.trim())
+    if (result.success && result.data) {
+      await loadGroups()
+      setSelectedGroupId(result.data.id)
+    } else {
+      setError(result.error || '创建分组失败')
+    }
+  }, [loadGroups])
+
+  const canSubmit = selectedGroupId && selectedDate && parsedData.length > 0 && !isImporting
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
@@ -142,6 +175,30 @@ export default function UploadPage() {
       </div>
 
       <div className="card p-6 space-y-6">
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <label className="block text-sm font-medium text-[var(--text-secondary)]">选择分组 *</label>
+            <button
+              onClick={handleCreateGroup}
+              className="text-sm text-[var(--primary-color)] hover:text-[var(--primary-dark)] transition-colors"
+            >
+              新建分组
+            </button>
+          </div>
+          <select
+            value={selectedGroupId}
+            onChange={(e) => setSelectedGroupId(e.target.value)}
+            className="select-field"
+          >
+            {groups.map((group) => (
+              <option key={group.id} value={group.id}>{group.name}</option>
+            ))}
+          </select>
+          {!selectedGroupId && (
+            <p className="text-sm text-yellow-400 mt-2">请先创建或选择分组</p>
+          )}
+        </div>
+
         <div className="flex gap-3">
           <button
             onClick={() => {
@@ -412,7 +469,7 @@ ST新都
           ) : (
             <span className="flex items-center justify-center gap-2">
               <span>📝</span>
-              {!selectedDate ? '请先选择日期' : parsedData.length === 0 ? '请先上传有效数据文件' : '准备导入'}
+              {!selectedGroupId ? '请先选择分组' : !selectedDate ? '请先选择日期' : parsedData.length === 0 ? '请先上传有效数据文件' : '准备导入'}
             </span>
           )}
         </button>
@@ -424,10 +481,18 @@ ST新都
           <li>• 支持 Excel (.xlsx, .xls)、CSV 和 TXT 文件格式</li>
           <li>• 文件需包含股票代码和名称列（列名包含"代码"、"名称"关键词即可）</li>
           <li>• TXT 文件请使用"代码+名称"交替格式，每行一个</li>
-          <li>• 同一日期多次上传将覆盖原有数据</li>
-          <li>• 系统会自动对比每日股票池变化</li>
+          <li>• 同一分组同一日期多次上传将覆盖原有数据</li>
+          <li>• 系统会自动在当前分组内对比每日股票池变化</li>
         </ul>
       </div>
     </div>
+  )
+}
+
+export default function UploadPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center h-64">Loading...</div>}>
+      <UploadContent />
+    </Suspense>
   )
 }

@@ -4,7 +4,7 @@ import { useMemo, useState, useEffect } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import StockTable from '../../components/StockTable'
 import { getComparePageData, getCompareResults } from '../../lib/api'
-import type { StockBatch, StockCompareResult, StockStatus } from '../../types'
+import type { StockBatch, StockCompareResult, StockStatus, StockGroup } from '../../types'
 
 function exportToCSV(data: StockCompareResult[]) {
   const headers = ['股票代码', '股票名称', '状态', '连续天数', '总出现次数']
@@ -48,6 +48,8 @@ function exportToCSV(data: StockCompareResult[]) {
 export default function CompareContent() {
   const searchParams = useSearchParams()
   const router = useRouter()
+  const [groups, setGroups] = useState<StockGroup[]>([])
+  const [selectedGroupId, setSelectedGroupId] = useState('')
   const [batches, setBatches] = useState<StockBatch[]>([])
   const [selectedDate, setSelectedDate] = useState('')
   const [compareResults, setCompareResults] = useState<StockCompareResult[]>([])
@@ -55,6 +57,7 @@ export default function CompareContent() {
   const [searchQuery, setSearchQuery] = useState('')
   const [loading, setLoading] = useState(true)
   const requestedDate = searchParams.get('date') || undefined
+  const requestedGroupId = searchParams.get('groupId') || undefined
   const requestedFilter = searchParams.get('filter')
 
   const isNewStockFilter = statusFilter === 'new' || statusFilter === 'first_seen'
@@ -63,8 +66,10 @@ export default function CompareContent() {
     const fetchInitialPageData = async () => {
       setLoading(true)
       try {
-        const result = await getComparePageData(requestedDate)
+        const result = await getComparePageData(requestedDate, requestedGroupId || selectedGroupId || undefined)
         const data = result.data
+        setGroups(data?.groups || [])
+        setSelectedGroupId(data?.selectedGroupId || '')
         setBatches(data?.batches || [])
         setSelectedDate(data?.selectedDate || '')
         setCompareResults(data?.results || [])
@@ -76,7 +81,7 @@ export default function CompareContent() {
     }
 
     fetchInitialPageData()
-  }, [requestedDate])
+  }, [requestedDate, requestedGroupId])
 
   useEffect(() => {
     if (requestedFilter) {
@@ -91,10 +96,27 @@ export default function CompareContent() {
     setSelectedDate(date)
     setLoading(true)
     try {
-      const result = await getCompareResults(date)
+      const result = await getCompareResults(date, selectedGroupId)
       setCompareResults(result.data || [])
     } catch (error) {
       console.error('Error fetching compare results:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleGroupChange = async (groupId: string) => {
+    setSelectedGroupId(groupId)
+    setLoading(true)
+    try {
+      const result = await getComparePageData(undefined, groupId)
+      const data = result.data
+      setBatches(data?.batches || [])
+      setSelectedDate(data?.selectedDate || '')
+      setCompareResults(data?.results || [])
+      router.replace(`/compare?groupId=${groupId}`)
+    } catch (error) {
+      console.error('Error fetching group compare data:', error)
     } finally {
       setLoading(false)
     }
@@ -187,6 +209,19 @@ export default function CompareContent() {
       <div className="card p-4">
         <div className="flex flex-wrap gap-4 items-center">
           <div className="flex-1 min-w-[200px]">
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">选择分组</label>
+            <select
+              value={selectedGroupId}
+              onChange={(e) => handleGroupChange(e.target.value)}
+              className="select-field"
+            >
+              {groups.map((group) => (
+                <option key={group.id} value={group.id}>{group.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex-1 min-w-[200px]">
             <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">选择日期</label>
             <select
               value={selectedDate}
@@ -260,7 +295,7 @@ export default function CompareContent() {
             <button
               onClick={() => {
                 const dateStr = selectedDate.split('T')[0]
-                router.push(`/report/generate?date=${dateStr}&count=${filteredResults.length}`)
+                router.push(`/report/generate?groupId=${selectedGroupId}&date=${dateStr}&count=${filteredResults.length}`)
               }}
               className="px-4 py-2 bg-gradient-to-r from-[var(--primary-color)] to-red-500 text-black rounded-lg hover:opacity-90 transition-opacity flex items-center gap-2"
             >
@@ -286,6 +321,11 @@ export default function CompareContent() {
         data={filteredResults}
         columns={['stock_code', 'stock_name', 'status', 'continuous_count', 'total_appear_count']}
       />
+      {selectedDate && compareResults.length === 0 && (
+        <div className="card p-8 text-center text-[var(--text-secondary)]">
+          当前组已有基准数据，上传下一份数据后生成对比结果
+        </div>
+      )}
     </div>
   )
 }

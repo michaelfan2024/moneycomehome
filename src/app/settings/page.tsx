@@ -4,6 +4,12 @@ import Link from 'next/link'
 
 const SETTINGS_ITEMS = [
   {
+    href: '/settings/groups',
+    icon: '🗂️',
+    title: '股票池分组',
+    description: '新增、重命名、停用或启用股票池分组'
+  },
+  {
     href: '/settings/ai',
     icon: '🤖',
     title: 'AI 分析设置',

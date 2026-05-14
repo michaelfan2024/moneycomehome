@@ -5,11 +5,13 @@ import { useRouter } from 'next/navigation'
 import StatsCard from '../components/StatsCard'
 import WisdomCard from '../components/WisdomCard'
 import { getDashboardOverview, deleteBatchById, updateBatchDate, recalculateCompareResults } from '../lib/api'
-import type { DashboardStats, StockBatch } from '../types'
+import type { DashboardStats, StockBatch, StockGroup } from '../types'
 
 export default function DashboardPage() {
   const router = useRouter()
   const [stats, setStats] = useState<DashboardStats | null>(null)
+  const [groups, setGroups] = useState<StockGroup[]>([])
+  const [selectedGroupId, setSelectedGroupId] = useState('')
   const [batches, setBatches] = useState<StockBatch[]>([])
   const [totalBatchCount, setTotalBatchCount] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -20,7 +22,12 @@ export default function DashboardPage() {
   const fetchDashboardData = async () => {
     setLoading(true)
     try {
-      const result = await getDashboardOverview()
+      const result = await getDashboardOverview(selectedGroupId || undefined)
+      const selected = selectedGroupId || result.data?.selectedGroupId || ''
+      if (!selectedGroupId && selected) {
+        setSelectedGroupId(selected)
+      }
+      setGroups(result.data?.groups || [])
       setStats(result.data?.stats || null)
       setBatches(result.data?.batches || [])
       setTotalBatchCount(result.data?.totalBatchCount || 0)
@@ -33,14 +40,14 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetchDashboardData()
-  }, [])
+  }, [selectedGroupId])
 
   const handleCardClick = (filterType: string) => {
-    router.push(`/compare?filter=${filterType}`)
+    router.push(`/compare?groupId=${selectedGroupId}&filter=${filterType}`)
   }
 
   const handleRankingClick = (minDays: number) => {
-    router.push(`/ranking?minDays=${minDays}`)
+    router.push(`/ranking?groupId=${selectedGroupId}&minDays=${minDays}`)
   }
 
   const formatDate = (dateString: string) => {
@@ -52,7 +59,7 @@ export default function DashboardPage() {
     
     setDeletingId(batchId)
     try {
-      const result = await deleteBatchById(batchId)
+      const result = await deleteBatchById(batchId, selectedGroupId)
       if (result.success) {
         await fetchDashboardData()
       } else {
@@ -80,7 +87,7 @@ export default function DashboardPage() {
     console.log('Updating batch', batchId, 'to date:', editDateValue)
     
     try {
-      const result = await updateBatchDate(batchId, editDateValue)
+      const result = await updateBatchDate(batchId, editDateValue, selectedGroupId)
       console.log('API response:', result)
       
       if (result.success) {
@@ -113,7 +120,7 @@ export default function DashboardPage() {
     
     setRecalculating(true)
     try {
-      const result = await recalculateCompareResults()
+      const result = await recalculateCompareResults(selectedGroupId)
       if (result.success) {
         await fetchDashboardData()
       } else {
@@ -140,6 +147,19 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       <WisdomCard />
+
+      <div className="card p-4">
+        <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">当前分组</label>
+        <select
+          value={selectedGroupId}
+          onChange={(e) => setSelectedGroupId(e.target.value)}
+          className="select-field max-w-xs"
+        >
+          {groups.map((group) => (
+            <option key={group.id} value={group.id}>{group.name}</option>
+          ))}
+        </select>
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <StatsCard
@@ -228,7 +248,7 @@ export default function DashboardPage() {
                   key={batch.id}
                   className={`flex items-center justify-between px-4 py-3 bg-[var(--bg-dark)] rounded-lg transition-all duration-200 animate-fadeIn ${String(editingId) === String(batch.id) ? '' : 'hover:bg-[var(--bg-card-hover)] cursor-pointer group'}`}
                   style={{ animationDelay: `${index * 50}ms` }}
-                  onClick={() => String(editingId) !== String(batch.id) && router.push(`/compare?date=${batch.batch_date}`)}
+                  onClick={() => String(editingId) !== String(batch.id) && router.push(`/compare?groupId=${selectedGroupId}&date=${batch.batch_date}`)}
                 >
                   <div className="flex items-center gap-3">
                     <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500/20 to-blue-600/10 flex items-center justify-center group-hover:scale-110 transition-transform">
@@ -319,7 +339,7 @@ export default function DashboardPage() {
                 </div>
                 <p className="text-[var(--text-muted)]">暂无上传记录</p>
                 <button
-                  onClick={() => router.push('/upload')}
+                  onClick={() => router.push(`/upload?groupId=${selectedGroupId}`)}
                   className="mt-4 px-4 py-2 bg-[var(--primary-color)] text-black font-medium rounded-lg hover:bg-[var(--primary-dark)] transition-colors"
                 >
                   立即上传
@@ -330,7 +350,7 @@ export default function DashboardPage() {
           {totalBatchCount > 6 && (
             <div className="mt-4 text-center">
               <button
-                onClick={() => router.push('/compare')}
+                onClick={() => router.push(`/compare?groupId=${selectedGroupId}`)}
                 className="text-sm text-[var(--primary-color)] hover:underline"
               >
                 查看全部 {totalBatchCount} 条记录 →

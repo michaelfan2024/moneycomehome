@@ -8,9 +8,10 @@ interface StockTableProps {
   data: (StockPoolItem | StockCompareResult)[]
   columns?: string[]
   showActions?: boolean
+  groupId?: string
 }
 
-function StockTable({ data, columns, showActions = false }: StockTableProps) {
+function StockTable({ data, columns, showActions = false, groupId }: StockTableProps) {
   const router = useRouter()
   const displayColumns = useMemo(() => columns || ['stock_code', 'stock_name', 'source', 'note'], [columns])
   
@@ -37,7 +38,7 @@ function StockTable({ data, columns, showActions = false }: StockTableProps) {
   }
 
   const handleViewDetail = (code: string) => {
-    router.push(`/detail/${code}`)
+    router.push(groupId ? `/detail/${code}?groupId=${groupId}` : `/detail/${code}`)
   }
 
   return (

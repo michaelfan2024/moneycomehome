@@ -1,32 +1,57 @@
 import { Pool } from 'pg'
 import { randomUUID } from 'crypto'
-import type { StockBatch, StockPoolItem, StockCompareResult, StockDetail, DashboardStats, StockStatus } from '../types'
+import type { StockBatch, StockPoolItem, StockCompareResult, StockDetail, DashboardStats, StockStatus, StockGroup } from '../types'
 import { getCache, setCache, invalidateCache } from './cache'
 import type { ReportTemplateInput, ReportTemplateRecord } from './report-template'
 import type { EastmoneyFinanceSummary } from './eastmoney-finance'
 import type { ComparePageData, DashboardOverview } from './stocks-page-data'
 
 const databaseUrl = process.env.DATABASE_URL
+export const DEFAULT_STOCK_GROUP_NAME = '每日火车股票池'
 
 let pool: Pool | null = null
 let tablesInitialized = false
 let initializationPromise: Promise<void> | null = null
 let keepAliveTimer: ReturnType<typeof setInterval> | null = null
 
-function invalidateStockPageCaches(date?: string): void {
+function normalizeGroupId(groupId?: string | number | null): string | undefined {
+  return groupId === undefined || groupId === null || groupId === '' ? undefined : String(groupId)
+}
+
+function invalidateStockPageCaches(date?: string, groupId?: string | number | null): void {
   const normalizedDate = date?.split('T')[0]
+  const normalizedGroupId = normalizeGroupId(groupId)
   invalidateCache('batches')
+  if (normalizedGroupId) {
+    invalidateCache(`batches_${normalizedGroupId}`)
+  }
+  invalidateCache('groups_active')
+  invalidateCache('groups_all')
   invalidateCache('dashboard_stats')
   invalidateCache('dashboard_overview_6')
+  if (normalizedGroupId) {
+    invalidateCache(`dashboard_stats_${normalizedGroupId}`)
+    invalidateCache(`dashboard_overview_${normalizedGroupId}_6`)
+  }
   invalidateCache('compare_page_data_latest')
+  if (normalizedGroupId) {
+    invalidateCache(`compare_page_data_${normalizedGroupId}_latest`)
+  }
 
   if (normalizedDate) {
     invalidateCache(`compare_results_${normalizedDate}`)
     invalidateCache(`compare_page_data_${normalizedDate}`)
+    if (normalizedGroupId) {
+      invalidateCache(`compare_results_${normalizedGroupId}_${normalizedDate}`)
+      invalidateCache(`compare_page_data_${normalizedGroupId}_${normalizedDate}`)
+    }
   }
 
   for (const minDays of [2, 3, 5, 10]) {
     invalidateCache(`continuous_ranking_${minDays}`)
+    if (normalizedGroupId) {
+      invalidateCache(`continuous_ranking_${normalizedGroupId}_${minDays}`)
+    }
   }
 }
 
@@ -90,14 +115,35 @@ export async function ensureTables(): Promise<void> {
   initializationPromise = (async () => {
     try {
       const client = await getClient()
+
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS stock_groups (
+          id SERIAL PRIMARY KEY,
+          name TEXT UNIQUE NOT NULL,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+
+      const defaultGroupResult = await client.query(
+        `INSERT INTO stock_groups (name, is_active)
+         VALUES ($1, TRUE)
+         ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+         RETURNING id`,
+        [DEFAULT_STOCK_GROUP_NAME]
+      )
+      const defaultGroupId = defaultGroupResult.rows[0].id
       
       await client.query(`
         CREATE TABLE IF NOT EXISTS stock_batches (
           id SERIAL PRIMARY KEY,
-          batch_date DATE UNIQUE NOT NULL,
+          group_id INTEGER REFERENCES stock_groups(id),
+          batch_date DATE NOT NULL,
           file_name TEXT NOT NULL,
           total_count INTEGER NOT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT stock_batches_group_date_key UNIQUE(group_id, batch_date)
         )
       `)
       
@@ -118,6 +164,8 @@ export async function ensureTables(): Promise<void> {
       await client.query(`
         CREATE TABLE IF NOT EXISTS stock_compare_results (
           id SERIAL PRIMARY KEY,
+          batch_id INTEGER REFERENCES stock_batches(id) ON DELETE CASCADE,
+          group_id INTEGER REFERENCES stock_groups(id),
           trade_date DATE NOT NULL,
           stock_code TEXT NOT NULL,
           stock_name TEXT,
@@ -126,8 +174,52 @@ export async function ensureTables(): Promise<void> {
           total_appear_count INTEGER NOT NULL,
           last_seen_date DATE,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          UNIQUE(trade_date, stock_code)
+          CONSTRAINT stock_compare_results_batch_code_key UNIQUE(batch_id, stock_code)
         )
+      `)
+
+      await client.query('ALTER TABLE stock_batches ADD COLUMN IF NOT EXISTS group_id INTEGER REFERENCES stock_groups(id)')
+      await client.query('UPDATE stock_batches SET group_id = $1 WHERE group_id IS NULL', [defaultGroupId])
+      await client.query('ALTER TABLE stock_batches ALTER COLUMN group_id SET NOT NULL')
+      await client.query('ALTER TABLE stock_batches DROP CONSTRAINT IF EXISTS stock_batches_batch_date_key')
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'stock_batches_group_date_key'
+          ) THEN
+            ALTER TABLE stock_batches ADD CONSTRAINT stock_batches_group_date_key UNIQUE (group_id, batch_date);
+          END IF;
+        END $$;
+      `)
+
+      await client.query('ALTER TABLE stock_compare_results ADD COLUMN IF NOT EXISTS batch_id INTEGER REFERENCES stock_batches(id) ON DELETE CASCADE')
+      await client.query('ALTER TABLE stock_compare_results ADD COLUMN IF NOT EXISTS group_id INTEGER REFERENCES stock_groups(id)')
+      await client.query(
+        `
+        UPDATE stock_compare_results compare
+        SET batch_id = batch.id,
+            group_id = batch.group_id
+        FROM stock_batches batch
+        WHERE compare.trade_date = batch.batch_date
+          AND batch.group_id = $1
+          AND (compare.batch_id IS NULL OR compare.group_id IS NULL)
+        `,
+        [defaultGroupId]
+      )
+      await client.query('DELETE FROM stock_compare_results WHERE batch_id IS NULL OR group_id IS NULL')
+      await client.query('ALTER TABLE stock_compare_results ALTER COLUMN batch_id SET NOT NULL')
+      await client.query('ALTER TABLE stock_compare_results ALTER COLUMN group_id SET NOT NULL')
+      await client.query('ALTER TABLE stock_compare_results DROP CONSTRAINT IF EXISTS stock_compare_results_trade_date_stock_code_key')
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'stock_compare_results_batch_code_key'
+          ) THEN
+            ALTER TABLE stock_compare_results ADD CONSTRAINT stock_compare_results_batch_code_key UNIQUE (batch_id, stock_code);
+          END IF;
+        END $$;
       `)
 
       await client.query(`
@@ -169,8 +261,12 @@ export async function ensureTables(): Promise<void> {
         )
       `)
       
+      await client.query('CREATE INDEX IF NOT EXISTS idx_stock_groups_active_name ON stock_groups(is_active, name)')
+      await client.query('CREATE INDEX IF NOT EXISTS idx_stock_batches_group_date_desc ON stock_batches(group_id, batch_date DESC)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_pool_items_batch_id ON stock_pool_items(batch_id)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_pool_items_stock_code ON stock_pool_items(stock_code)')
+      await client.query('CREATE INDEX IF NOT EXISTS idx_stock_compare_results_batch_id ON stock_compare_results(batch_id)')
+      await client.query('CREATE INDEX IF NOT EXISTS idx_stock_compare_results_group_trade_date ON stock_compare_results(group_id, trade_date)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_compare_results_trade_date ON stock_compare_results(trade_date)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_compare_results_stock_code ON stock_compare_results(stock_code)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_compare_results_status ON stock_compare_results(status)')
@@ -192,18 +288,157 @@ export async function ensureTables(): Promise<void> {
   await initializationPromise
 }
 
-export async function createBatch(batchDate: string, fileName: string, totalCount: number): Promise<StockBatch | null> {
+export async function getDefaultGroup(): Promise<StockGroup | null> {
+  try {
+    await ensureTables()
+    const client = await getClient()
+    const result = await client.query(
+      `SELECT id::text as id, name, is_active, created_at::text as created_at, updated_at::text as updated_at
+       FROM stock_groups
+       WHERE name = $1
+       LIMIT 1`,
+      [DEFAULT_STOCK_GROUP_NAME]
+    )
+    return result.rows[0] || null
+  } catch (error) {
+    console.error('Error getting default group:', error)
+    return null
+  }
+}
+
+export async function resolveGroupId(groupId?: string | number | null): Promise<string | null> {
+  try {
+    await ensureTables()
+    const client = await getClient()
+    const normalizedGroupId = normalizeGroupId(groupId)
+
+    if (normalizedGroupId) {
+      const groupResult = await client.query('SELECT id::text as id FROM stock_groups WHERE id = $1 LIMIT 1', [normalizedGroupId])
+      if (groupResult.rows[0]?.id) {
+        return groupResult.rows[0].id
+      }
+    }
+
+    const defaultGroup = await getDefaultGroup()
+    return defaultGroup?.id || null
+  } catch (error) {
+    console.error('Error resolving group id:', error)
+    return null
+  }
+}
+
+export async function getStockGroups(includeInactive: boolean = false): Promise<StockGroup[] | null> {
+  const cacheKey = includeInactive ? 'groups_all' : 'groups_active'
+  const cached = getCache<StockGroup[]>(cacheKey)
+  if (cached) {
+    return cached
+  }
+
+  try {
+    await ensureTables()
+    const client = await getClient()
+    const result = await client.query(
+      `
+      SELECT id::text as id, name, is_active, created_at::text as created_at, updated_at::text as updated_at
+      FROM stock_groups
+      WHERE $1::boolean OR is_active = TRUE
+      ORDER BY is_active DESC, created_at ASC, name ASC
+      `,
+      [includeInactive]
+    )
+    setCache(cacheKey, result.rows)
+    return result.rows
+  } catch (error) {
+    console.error('Error getting stock groups:', error)
+    return null
+  }
+}
+
+export async function createStockGroup(name: string): Promise<StockGroup | null> {
+  try {
+    await ensureTables()
+    const client = await getClient()
+    const trimmedName = name.trim()
+    if (!trimmedName) {
+      return null
+    }
+
+    const result = await client.query(
+      `
+      INSERT INTO stock_groups (name, is_active)
+      VALUES ($1, TRUE)
+      ON CONFLICT (name) DO UPDATE
+      SET is_active = TRUE,
+          updated_at = CURRENT_TIMESTAMP
+      RETURNING id::text as id, name, is_active, created_at::text as created_at, updated_at::text as updated_at
+      `,
+      [trimmedName]
+    )
+    invalidateStockPageCaches()
+    return result.rows[0] || null
+  } catch (error) {
+    console.error('Error creating stock group:', error)
+    return null
+  }
+}
+
+export async function updateStockGroup(
+  groupId: string | number,
+  input: { name?: string; is_active?: boolean }
+): Promise<StockGroup | null> {
+  try {
+    await ensureTables()
+    const client = await getClient()
+    const currentResult = await client.query(
+      'SELECT name, is_active FROM stock_groups WHERE id = $1 LIMIT 1',
+      [groupId]
+    )
+    const current = currentResult.rows[0]
+    if (!current) {
+      return null
+    }
+
+    const nextName = input.name !== undefined ? input.name.trim() : current.name
+    if (!nextName) {
+      return null
+    }
+
+    const nextActive = input.is_active !== undefined ? input.is_active : current.is_active
+    const result = await client.query(
+      `
+      UPDATE stock_groups
+      SET name = $2,
+          is_active = $3,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      RETURNING id::text as id, name, is_active, created_at::text as created_at, updated_at::text as updated_at
+      `,
+      [groupId, nextName, nextActive]
+    )
+    invalidateStockPageCaches(undefined, groupId)
+    return result.rows[0] || null
+  } catch (error) {
+    console.error('Error updating stock group:', error)
+    return null
+  }
+}
+
+export async function createBatch(batchDate: string, fileName: string, totalCount: number, groupId?: string | number | null): Promise<StockBatch | null> {
   try {
     const client = await getClient()
     const normalizedDate = batchDate.split('T')[0]
-    console.log('Creating batch with date:', normalizedDate)
+    const resolvedGroupId = await resolveGroupId(groupId)
+    if (!resolvedGroupId) {
+      throw new Error('无法解析股票池分组')
+    }
+    console.log('Creating batch with date:', normalizedDate, 'group:', resolvedGroupId)
     
     const result = await client.query(
-      'INSERT INTO stock_batches (batch_date, file_name, total_count) VALUES ($1, $2, $3) RETURNING *',
-      [normalizedDate, fileName, totalCount]
+      'INSERT INTO stock_batches (group_id, batch_date, file_name, total_count) VALUES ($1, $2, $3, $4) RETURNING id::text as id, group_id::text as group_id, batch_date::text as batch_date, file_name, total_count, created_at::text as created_at',
+      [resolvedGroupId, normalizedDate, fileName, totalCount]
     )
     
-    invalidateStockPageCaches(normalizedDate)
+    invalidateStockPageCaches(normalizedDate, resolvedGroupId)
     
     return result.rows[0]
   } catch (error) {
@@ -212,15 +447,19 @@ export async function createBatch(batchDate: string, fileName: string, totalCoun
   }
 }
 
-export async function getBatchByDate(date: string): Promise<StockBatch | null> {
+export async function getBatchByDate(date: string, groupId?: string | number | null): Promise<StockBatch | null> {
   try {
     const client = await getClient()
     const normalizedDate = date.split('T')[0]
-    console.log('Getting batch for date:', normalizedDate)
+    const resolvedGroupId = await resolveGroupId(groupId)
+    if (!resolvedGroupId) {
+      return null
+    }
+    console.log('Getting batch for date:', normalizedDate, 'group:', resolvedGroupId)
     
     const result = await client.query(
-      'SELECT * FROM stock_batches WHERE batch_date::TEXT = $1',
-      [normalizedDate]
+      'SELECT id::text as id, group_id::text as group_id, batch_date::text as batch_date, file_name, total_count, created_at::text as created_at FROM stock_batches WHERE batch_date::TEXT = $1 AND group_id = $2',
+      [normalizedDate, resolvedGroupId]
     )
     
     if (result.rows[0]) {
@@ -237,9 +476,10 @@ export async function getBatchByDate(date: string): Promise<StockBatch | null> {
 export async function deleteBatch(batchId: number): Promise<boolean> {
   try {
     const client = await getClient()
+    const batchResult = await client.query('SELECT batch_date::text as batch_date, group_id::text as group_id FROM stock_batches WHERE id = $1', [batchId])
     await client.query('DELETE FROM stock_batches WHERE id = $1', [batchId])
     
-    invalidateStockPageCaches()
+    invalidateStockPageCaches(batchResult.rows[0]?.batch_date, batchResult.rows[0]?.group_id)
     
     return true
   } catch (error) {
@@ -255,13 +495,13 @@ export async function updateBatchDate(batchId: number, newDate: string): Promise
     console.log('Updating batch', batchId, 'to date:', normalizedDate)
     
     const result = await client.query(
-      'UPDATE stock_batches SET batch_date = $1 WHERE id = $2',
+      'UPDATE stock_batches SET batch_date = $1 WHERE id = $2 RETURNING group_id::text as group_id',
       [normalizedDate, batchId]
     )
     
     console.log('Update result:', result.rowCount, 'rows affected')
     
-    invalidateStockPageCaches(normalizedDate)
+    invalidateStockPageCaches(normalizedDate, result.rows[0]?.group_id)
     
     return (result.rowCount ?? 0) > 0
   } catch (error) {
@@ -283,7 +523,7 @@ export async function createStockItems(items: Omit<StockPoolItem, 'id' | 'create
     const params = items.flatMap(item => [item.batch_id, item.trade_date, item.stock_code, item.stock_name, item.source || null, item.note || null])
     
     const result = await client.query(
-      `INSERT INTO stock_pool_items (batch_id, trade_date, stock_code, stock_name, source, note) VALUES ${values} RETURNING *`,
+      `INSERT INTO stock_pool_items (batch_id, trade_date, stock_code, stock_name, source, note) VALUES ${values} RETURNING id::text as id, batch_id::text as batch_id, trade_date::text as trade_date, stock_code, stock_name, source, note, created_at::text as created_at`,
       params
     )
     
@@ -302,7 +542,7 @@ export async function getStockItemsByBatch(batchId: number): Promise<StockPoolIt
   try {
     const client = await getClient()
     const result = await client.query(
-      'SELECT * FROM stock_pool_items WHERE batch_id = $1 ORDER BY stock_code',
+      'SELECT id::text as id, batch_id::text as batch_id, trade_date::text as trade_date, stock_code, stock_name, source, note, created_at::text as created_at FROM stock_pool_items WHERE batch_id = $1 ORDER BY stock_code',
       [batchId]
     )
     
@@ -328,11 +568,16 @@ export async function deleteStockItemsByBatch(batchId: number): Promise<boolean>
   }
 }
 
-export async function getLatestBatch(): Promise<StockBatch | null> {
+export async function getLatestBatch(groupId?: string | number | null): Promise<StockBatch | null> {
   try {
     const client = await getClient()
+    const resolvedGroupId = await resolveGroupId(groupId)
+    if (!resolvedGroupId) {
+      return null
+    }
     const result = await client.query(
-      'SELECT * FROM stock_batches ORDER BY batch_date DESC LIMIT 1'
+      'SELECT id::text as id, group_id::text as group_id, batch_date::text as batch_date, file_name, total_count, created_at::text as created_at FROM stock_batches WHERE group_id = $1 ORDER BY batch_date DESC LIMIT 1',
+      [resolvedGroupId]
     )
     return result.rows[0] || null
   } catch (error) {
@@ -341,13 +586,17 @@ export async function getLatestBatch(): Promise<StockBatch | null> {
   }
 }
 
-export async function getPreviousBatch(currentDate: string): Promise<StockBatch | null> {
+export async function getPreviousBatch(currentDate: string, groupId?: string | number | null): Promise<StockBatch | null> {
   try {
     const client = await getClient()
     const normalizedDate = currentDate.split('T')[0]
+    const resolvedGroupId = await resolveGroupId(groupId)
+    if (!resolvedGroupId) {
+      return null
+    }
     const result = await client.query(
-      "SELECT id, batch_date::TEXT as batch_date, file_name, total_count, created_at FROM stock_batches WHERE batch_date::TEXT < $1 ORDER BY batch_date DESC LIMIT 1",
-      [normalizedDate]
+      "SELECT id::text as id, group_id::text as group_id, batch_date::TEXT as batch_date, file_name, total_count, created_at::text as created_at FROM stock_batches WHERE batch_date::TEXT < $1 AND group_id = $2 ORDER BY batch_date DESC LIMIT 1",
+      [normalizedDate, resolvedGroupId]
     )
     return result.rows[0] || null
   } catch (error) {
@@ -356,8 +605,12 @@ export async function getPreviousBatch(currentDate: string): Promise<StockBatch 
   }
 }
 
-export async function getAllBatches(): Promise<StockBatch[] | null> {
-  const cacheKey = 'batches'
+export async function getAllBatches(groupId?: string | number | null): Promise<StockBatch[] | null> {
+  const resolvedGroupId = await resolveGroupId(groupId)
+  if (!resolvedGroupId) {
+    return null
+  }
+  const cacheKey = `batches_${resolvedGroupId}`
   const cached = getCache<StockBatch[]>(cacheKey)
   if (cached) {
     return cached
@@ -366,7 +619,8 @@ export async function getAllBatches(): Promise<StockBatch[] | null> {
   try {
     const client = await getClient()
     const result = await client.query(
-      'SELECT id, batch_date::TEXT as batch_date, file_name, total_count, created_at FROM stock_batches ORDER BY batch_date DESC'
+      'SELECT id::text as id, group_id::text as group_id, batch_date::TEXT as batch_date, file_name, total_count, created_at::text as created_at FROM stock_batches WHERE group_id = $1 ORDER BY batch_date DESC',
+      [resolvedGroupId]
     )
     setCache(cacheKey, result.rows)
     return result.rows
@@ -384,8 +638,12 @@ const emptyDashboardStats: DashboardStats = {
   continuous_5d_count: 0
 }
 
-export async function getDashboardOverview(recentLimit: number = 6): Promise<DashboardOverview | null> {
-  const cacheKey = `dashboard_overview_${recentLimit}`
+export async function getDashboardOverview(recentLimit: number = 6, groupId?: string | number | null): Promise<DashboardOverview | null> {
+  const resolvedGroupId = await resolveGroupId(groupId)
+  if (!resolvedGroupId) {
+    return null
+  }
+  const cacheKey = `dashboard_overview_${resolvedGroupId}_${recentLimit}`
   const cached = getCache<DashboardOverview>(cacheKey)
   if (cached) {
     return cached
@@ -393,11 +651,13 @@ export async function getDashboardOverview(recentLimit: number = 6): Promise<Das
 
   try {
     const client = await getClient()
+    const groups = await getStockGroups(false) || []
     const result = await client.query(
       `
       WITH latest_batch AS (
         SELECT id, batch_date
         FROM stock_batches
+        WHERE group_id = $2
         ORDER BY batch_date DESC
         LIMIT 1
       ),
@@ -409,18 +669,21 @@ export async function getDashboardOverview(recentLimit: number = 6): Promise<Das
           COALESCE(SUM(CASE WHEN continuous_count >= 3 THEN 1 ELSE 0 END), 0)::int as continuous_3d_count,
           COALESCE(SUM(CASE WHEN continuous_count >= 5 THEN 1 ELSE 0 END), 0)::int as continuous_5d_count
         FROM stock_compare_results
-        WHERE trade_date = (SELECT batch_date FROM latest_batch)
+        WHERE batch_id = (SELECT id FROM latest_batch)
+          AND group_id = $2
       ),
       recent_batches AS (
         SELECT COALESCE(json_agg(row_to_json(batch_row)), '[]'::json) as batches
         FROM (
           SELECT
             id::text as id,
+            group_id::text as group_id,
             batch_date::text as batch_date,
             file_name,
             total_count,
             created_at::text as created_at
           FROM stock_batches
+          WHERE group_id = $2
           ORDER BY batch_date DESC
           LIMIT $1
         ) batch_row
@@ -428,6 +691,7 @@ export async function getDashboardOverview(recentLimit: number = 6): Promise<Das
       batch_count AS (
         SELECT COUNT(*)::int as total_batch_count
         FROM stock_batches
+        WHERE group_id = $2
       )
       SELECT
         stats.today_count,
@@ -441,7 +705,7 @@ export async function getDashboardOverview(recentLimit: number = 6): Promise<Das
       CROSS JOIN recent_batches
       CROSS JOIN batch_count
       `,
-      [recentLimit]
+      [recentLimit, resolvedGroupId]
     )
 
     const row = result.rows[0]
@@ -454,7 +718,9 @@ export async function getDashboardOverview(recentLimit: number = 6): Promise<Das
         continuous_5d_count: Number(row.continuous_5d_count) || 0
       } : emptyDashboardStats,
       batches: row?.batches || [],
-      totalBatchCount: Number(row?.total_batch_count) || 0
+      totalBatchCount: Number(row?.total_batch_count) || 0,
+      groups,
+      selectedGroupId: resolvedGroupId
     }
 
     setCache(cacheKey, overview)
@@ -465,10 +731,14 @@ export async function getDashboardOverview(recentLimit: number = 6): Promise<Das
   }
 }
 
-export async function getComparePageData(requestedDate?: string | null): Promise<ComparePageData | null> {
+export async function getComparePageData(requestedDate?: string | null, groupId?: string | number | null): Promise<ComparePageData | null> {
+  const resolvedGroupId = await resolveGroupId(groupId)
+  if (!resolvedGroupId) {
+    return null
+  }
   const normalizedDate = requestedDate?.split('T')[0]
   const safeDate = normalizedDate && /^\d{4}-\d{2}-\d{2}$/.test(normalizedDate) ? normalizedDate : null
-  const cacheKey = `compare_page_data_${safeDate || 'latest'}`
+  const cacheKey = `compare_page_data_${resolvedGroupId}_${safeDate || 'latest'}`
   const cached = getCache<ComparePageData>(cacheKey)
   if (cached) {
     return cached
@@ -476,24 +746,36 @@ export async function getComparePageData(requestedDate?: string | null): Promise
 
   try {
     const client = await getClient()
+    const groups = await getStockGroups(false) || []
     const result = await client.query(
       `
       WITH batches AS (
         SELECT
           id::text as id,
+          group_id::text as group_id,
           batch_date::text as batch_date,
           batch_date as raw_batch_date,
           file_name,
           total_count,
           created_at::text as created_at
         FROM stock_batches
+        WHERE group_id = $2
         ORDER BY batch_date DESC
       ),
       selected_batch AS (
-        SELECT COALESCE(
-          (SELECT raw_batch_date FROM batches WHERE raw_batch_date = $1::date LIMIT 1),
-          (SELECT raw_batch_date FROM batches LIMIT 1)
-        ) as batch_date
+        SELECT
+          selected.id,
+          selected.raw_batch_date as batch_date
+        FROM (
+          SELECT * FROM batches WHERE raw_batch_date = $1::date LIMIT 1
+        ) selected
+        UNION ALL
+        SELECT fallback.id, fallback.raw_batch_date
+        FROM (
+          SELECT * FROM batches LIMIT 1
+        ) fallback
+        WHERE NOT EXISTS (SELECT 1 FROM batches WHERE raw_batch_date = $1::date)
+        LIMIT 1
       ),
       batch_json AS (
         SELECT COALESCE(json_agg(row_to_json(batch_row)), '[]'::json) as batches
@@ -507,6 +789,8 @@ export async function getComparePageData(requestedDate?: string | null): Promise
         FROM (
           SELECT
             id::text as id,
+            batch_id::text as batch_id,
+            group_id::text as group_id,
             trade_date::text as trade_date,
             stock_code,
             stock_name,
@@ -516,7 +800,8 @@ export async function getComparePageData(requestedDate?: string | null): Promise
             last_seen_date::text as last_seen_date,
             created_at::text as created_at
           FROM stock_compare_results
-          WHERE trade_date = (SELECT batch_date FROM selected_batch)
+          WHERE batch_id = (SELECT id::int FROM selected_batch)
+            AND group_id = $2
           ORDER BY status, stock_code
         ) result_row
       )
@@ -527,11 +812,13 @@ export async function getComparePageData(requestedDate?: string | null): Promise
       FROM batch_json
       CROSS JOIN result_json
       `,
-      [safeDate]
+      [safeDate, resolvedGroupId]
     )
 
     const row = result.rows[0]
     const pageData: ComparePageData = {
+      groups,
+      selectedGroupId: resolvedGroupId,
       batches: row?.batches || [],
       selectedDate: row?.selected_date || '',
       results: row?.results || []
@@ -547,21 +834,25 @@ export async function getComparePageData(requestedDate?: string | null): Promise
 
 export async function createCompareResults(results: Omit<StockCompareResult, 'id' | 'created_at'>[]): Promise<StockCompareResult[] | null> {
   try {
+    if (results.length === 0) {
+      return []
+    }
+
     const client = await getClient()
     const values = results.map((item, index) => 
-      `($${index * 7 + 1}, $${index * 7 + 2}, $${index * 7 + 3}, $${index * 7 + 4}, $${index * 7 + 5}, $${index * 7 + 6}, $${index * 7 + 7})`
+      `($${index * 9 + 1}, $${index * 9 + 2}, $${index * 9 + 3}, $${index * 9 + 4}, $${index * 9 + 5}, $${index * 9 + 6}, $${index * 9 + 7}, $${index * 9 + 8}, $${index * 9 + 9})`
     ).join(', ')
     
-    const params = results.flatMap(item => [item.trade_date, item.stock_code, item.stock_name, item.status, item.continuous_count, item.total_appear_count, item.last_seen_date || null])
+    const params = results.flatMap(item => [item.batch_id, item.group_id, item.trade_date, item.stock_code, item.stock_name, item.status, item.continuous_count, item.total_appear_count, item.last_seen_date || null])
     
     const result = await client.query(
-      `INSERT INTO stock_compare_results (trade_date, stock_code, stock_name, status, continuous_count, total_appear_count, last_seen_date) VALUES ${values} RETURNING *`,
+      `INSERT INTO stock_compare_results (batch_id, group_id, trade_date, stock_code, stock_name, status, continuous_count, total_appear_count, last_seen_date) VALUES ${values} RETURNING id::text as id, batch_id::text as batch_id, group_id::text as group_id, trade_date::text as trade_date, stock_code, stock_name, status, continuous_count, total_appear_count, last_seen_date::text as last_seen_date, created_at::text as created_at`,
       params
     )
     
-    invalidateStockPageCaches(results[0]?.trade_date)
+    invalidateStockPageCaches(results[0]?.trade_date, results[0]?.group_id)
     if (results.length > 0) {
-      invalidateCache(`compare_results_${results[0].trade_date}`)
+      invalidateCache(`compare_results_${results[0].group_id}_${results[0].trade_date}`)
     }
     
     return result.rows
@@ -571,12 +862,16 @@ export async function createCompareResults(results: Omit<StockCompareResult, 'id
   }
 }
 
-export async function deleteCompareResultsByDate(date: string): Promise<boolean> {
+export async function deleteCompareResultsByDate(date: string, groupId?: string | number | null): Promise<boolean> {
   try {
     const client = await getClient()
     const normalizedDate = date.split('T')[0]
-    await client.query('DELETE FROM stock_compare_results WHERE trade_date = $1', [normalizedDate])
-    invalidateStockPageCaches(normalizedDate)
+    const resolvedGroupId = await resolveGroupId(groupId)
+    if (!resolvedGroupId) {
+      return false
+    }
+    await client.query('DELETE FROM stock_compare_results WHERE trade_date = $1 AND group_id = $2', [normalizedDate, resolvedGroupId])
+    invalidateStockPageCaches(normalizedDate, resolvedGroupId)
     return true
   } catch (error) {
     console.error('Error deleting compare results:', error)
@@ -584,9 +879,36 @@ export async function deleteCompareResultsByDate(date: string): Promise<boolean>
   }
 }
 
-export async function getCompareResultsByDate(date: string): Promise<StockCompareResult[] | null> {
+export async function deleteCompareResultsByBatchIds(batchIds: Array<string | number>, groupId?: string | number | null): Promise<boolean> {
+  try {
+    if (batchIds.length === 0) {
+      return true
+    }
+
+    const client = await getClient()
+    const resolvedGroupId = await resolveGroupId(groupId)
+    if (!resolvedGroupId) {
+      return false
+    }
+    await client.query(
+      'DELETE FROM stock_compare_results WHERE batch_id = ANY($1::int[]) AND group_id = $2',
+      [batchIds.map(Number), resolvedGroupId]
+    )
+    invalidateStockPageCaches(undefined, resolvedGroupId)
+    return true
+  } catch (error) {
+    console.error('Error deleting compare results by batch ids:', error)
+    return false
+  }
+}
+
+export async function getCompareResultsByDate(date: string, groupId?: string | number | null): Promise<StockCompareResult[] | null> {
   const normalizedDate = date.split('T')[0]
-  const cacheKey = `compare_results_${normalizedDate}`
+  const resolvedGroupId = await resolveGroupId(groupId)
+  if (!resolvedGroupId) {
+    return null
+  }
+  const cacheKey = `compare_results_${resolvedGroupId}_${normalizedDate}`
   const cached = getCache<StockCompareResult[]>(cacheKey)
   if (cached) {
     return cached
@@ -595,8 +917,8 @@ export async function getCompareResultsByDate(date: string): Promise<StockCompar
   try {
     const client = await getClient()
     const result = await client.query(
-      'SELECT * FROM stock_compare_results WHERE trade_date = $1 ORDER BY status, stock_code',
-      [normalizedDate]
+      'SELECT id::text as id, batch_id::text as batch_id, group_id::text as group_id, trade_date::text as trade_date, stock_code, stock_name, status, continuous_count, total_appear_count, last_seen_date::text as last_seen_date, created_at::text as created_at FROM stock_compare_results WHERE trade_date = $1 AND group_id = $2 ORDER BY status, stock_code',
+      [normalizedDate, resolvedGroupId]
     )
     setCache(cacheKey, result.rows)
     return result.rows
@@ -606,8 +928,12 @@ export async function getCompareResultsByDate(date: string): Promise<StockCompar
   }
 }
 
-export async function getDashboardStats(): Promise<DashboardStats | null> {
-  const cacheKey = 'dashboard_stats'
+export async function getDashboardStats(groupId?: string | number | null): Promise<DashboardStats | null> {
+  const resolvedGroupId = await resolveGroupId(groupId)
+  if (!resolvedGroupId) {
+    return emptyDashboardStats
+  }
+  const cacheKey = `dashboard_stats_${resolvedGroupId}`
   const cached = getCache<DashboardStats>(cacheKey)
   if (cached) {
     return cached
@@ -617,7 +943,8 @@ export async function getDashboardStats(): Promise<DashboardStats | null> {
     const client = await getClient()
     
     const latestBatchResult = await client.query(
-      'SELECT id, batch_date::TEXT as batch_date FROM stock_batches ORDER BY batch_date DESC LIMIT 1'
+      'SELECT id, batch_date::TEXT as batch_date FROM stock_batches WHERE group_id = $1 ORDER BY batch_date DESC LIMIT 1',
+      [resolvedGroupId]
     )
     
     if (!latestBatchResult.rows[0]) {
@@ -643,8 +970,9 @@ export async function getDashboardStats(): Promise<DashboardStats | null> {
           SUM(CASE WHEN continuous_count >= 3 THEN 1 ELSE 0 END) as continuous_3d_count,
           SUM(CASE WHEN continuous_count >= 5 THEN 1 ELSE 0 END) as continuous_5d_count
         FROM stock_compare_results 
-        WHERE trade_date = $1
-      `, [latestBatch.batch_date])
+        WHERE batch_id = $1
+          AND group_id = $2
+      `, [latestBatch.id, resolvedGroupId])
     ])
     
     const todayCount = parseInt(todayCountResult.rows[0].count) || 0
@@ -672,12 +1000,23 @@ export async function getDashboardStats(): Promise<DashboardStats | null> {
   }
 }
 
-export async function getStockDetail(stockCode: string): Promise<StockDetail | null> {
+export async function getStockDetail(stockCode: string, groupId?: string | number | null): Promise<StockDetail | null> {
   try {
     const client = await getClient()
+    const resolvedGroupId = await resolveGroupId(groupId)
+    if (!resolvedGroupId) {
+      return null
+    }
     const result = await client.query(
-      'SELECT trade_date, stock_name FROM stock_pool_items WHERE stock_code = $1 ORDER BY trade_date',
-      [stockCode]
+      `
+      SELECT item.trade_date::text as trade_date, item.stock_name
+      FROM stock_pool_items item
+      INNER JOIN stock_batches batch ON batch.id = item.batch_id
+      WHERE item.stock_code = $1
+        AND batch.group_id = $2
+      ORDER BY item.trade_date
+      `,
+      [stockCode, resolvedGroupId]
     )
     
     if (!result.rows || result.rows.length === 0) {
@@ -690,22 +1029,7 @@ export async function getStockDetail(stockCode: string): Promise<StockDetail | n
     let breakCount = 0
     let currentContinuous = 0
     
-    for (let i = 0; i < appearanceDates.length; i++) {
-      if (i === 0) {
-        currentContinuous = 1
-      } else {
-        const prevDate = new Date(appearanceDates[i - 1])
-        const currDate = new Date(appearanceDates[i])
-        const diffDays = Math.round((currDate.getTime() - prevDate.getTime()) / (1000 * 60 * 60 * 24))
-        
-        if (diffDays === 1) {
-          currentContinuous++
-        } else {
-          breakCount++
-          currentContinuous = 1
-        }
-      }
-    }
+    currentContinuous = appearanceDates.length
 
     const today = new Date().toISOString().split('T')[0]
     const lastDate = appearanceDates[appearanceDates.length - 1]
@@ -727,8 +1051,12 @@ export async function getStockDetail(stockCode: string): Promise<StockDetail | n
   }
 }
 
-export async function getContinuousRanking(minDays: number = 2): Promise<StockCompareResult[] | null> {
-  const cacheKey = `continuous_ranking_${minDays}`
+export async function getContinuousRanking(minDays: number = 2, groupId?: string | number | null): Promise<StockCompareResult[] | null> {
+  const resolvedGroupId = await resolveGroupId(groupId)
+  if (!resolvedGroupId) {
+    return null
+  }
+  const cacheKey = `continuous_ranking_${resolvedGroupId}_${minDays}`
   const cached = getCache<StockCompareResult[]>(cacheKey)
   if (cached) {
     return cached
@@ -739,13 +1067,16 @@ export async function getContinuousRanking(minDays: number = 2): Promise<StockCo
     const result = await client.query(
       `
       WITH latest_batch AS (
-        SELECT batch_date
+        SELECT id
         FROM stock_batches
+        WHERE group_id = $2
         ORDER BY batch_date DESC
         LIMIT 1
       )
       SELECT
         id::text as id,
+        batch_id::text as batch_id,
+        group_id::text as group_id,
         trade_date::text as trade_date,
         stock_code,
         stock_name,
@@ -755,11 +1086,12 @@ export async function getContinuousRanking(minDays: number = 2): Promise<StockCo
         last_seen_date::text as last_seen_date,
         created_at::text as created_at
       FROM stock_compare_results
-      WHERE trade_date = (SELECT batch_date FROM latest_batch)
+      WHERE batch_id = (SELECT id FROM latest_batch)
+        AND group_id = $2
         AND continuous_count >= $1
       ORDER BY continuous_count DESC, stock_code
       `,
-      [minDays]
+      [minDays, resolvedGroupId]
     )
     setCache(cacheKey, result.rows)
     return result.rows

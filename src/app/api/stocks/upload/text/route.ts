@@ -7,24 +7,24 @@ import {
   deleteBatch, 
   deleteStockItemsByBatch, 
   getBatchByDate,
-  getPreviousBatch,
-  getAllBatches,
-  getStockItemsByBatch,
-  createCompareResults,
-  deleteCompareResultsByDate
+  resolveGroupId
 } from '../../../../../lib/db'
-import { compareStockPools } from '../../../../../lib/comparer'
+import { recalculateCompareResultsForGroup } from '../../../../../lib/compare-service'
 import type { StockPoolItem } from '../../../../../types'
 
 export async function POST(request: Request) {
   try {
-    const { date, text } = await request.json()
+    const { date, text, groupId } = await request.json()
 
     if (!date || !text) {
       return NextResponse.json({ success: false, error: '缺少日期或数据' }, { status: 400 })
     }
 
     await ensureTables()
+    const resolvedGroupId = await resolveGroupId(groupId)
+    if (!resolvedGroupId) {
+      return NextResponse.json({ success: false, error: '股票池分组不存在' }, { status: 400 })
+    }
 
     const parsedData = parseTextData(text)
 
@@ -32,15 +32,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: '未解析到任何股票数据' }, { status: 400 })
     }
 
-    const existingBatch = await getBatchByDate(date)
+    const existingBatch = await getBatchByDate(date, resolvedGroupId)
     
     if (existingBatch) {
       await deleteStockItemsByBatch(parseInt(String(existingBatch.id)))
-      await deleteCompareResultsByDate(date)
       await deleteBatch(parseInt(String(existingBatch.id)))
     }
 
-    const batch = await createBatch(date, 'text_upload', parsedData.length)
+    const batch = await createBatch(date, 'text_upload', parsedData.length, resolvedGroupId)
     if (!batch) {
       throw new Error('创建批次失败')
     }
@@ -56,34 +55,7 @@ export async function POST(request: Request) {
 
     await createStockItems(stockItems)
 
-    const previousBatch = await getPreviousBatch(date)
-    if (previousBatch) {
-      const [currentItems, previousItems, allBatches] = await Promise.all([
-        getStockItemsByBatch(parseInt(String(batch.id))),
-        getStockItemsByBatch(parseInt(String(previousBatch.id))),
-        getAllBatches()
-      ])
-
-      if (currentItems && previousItems && allBatches) {
-        const allHistoricalItems: StockPoolItem[] = []
-        for (const histBatch of allBatches) {
-          if (histBatch.id !== batch.id) {
-            const items = await getStockItemsByBatch(parseInt(String(histBatch.id)))
-            if (items) {
-              allHistoricalItems.push(...items)
-            }
-          }
-        }
-
-        const { compareResults } = compareStockPools(
-          currentItems,
-          previousItems,
-          allHistoricalItems
-        )
-
-        await createCompareResults(compareResults)
-      }
-    }
+    await recalculateCompareResultsForGroup(resolvedGroupId, date)
 
     return NextResponse.json({ success: true, count: parsedData.length })
   } catch (error) {

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
-import { ensureTables, deleteBatch, deleteStockItemsByBatch, deleteCompareResultsByDate, updateBatchDate, getBatchByDate } from '../../../../lib/db'
+import { ensureTables, deleteBatch, updateBatchDate, getBatchByDate, getBatchById } from '../../../../lib/db'
+import { recalculateCompareResultsForGroup } from '../../../../lib/compare-service'
 
 export async function DELETE(request: Request) {
   try {
@@ -16,9 +17,11 @@ export async function DELETE(request: Request) {
       return NextResponse.json({ success: false, error: '无效的批次ID' }, { status: 400 })
     }
 
-    await deleteStockItemsByBatch(id)
-    await deleteCompareResultsByDate(new Date().toISOString().split('T')[0])
+    const batch = await getBatchById(id)
     await deleteBatch(id)
+    if (batch) {
+      await recalculateCompareResultsForGroup(batch.group_id, batch.batch_date)
+    }
 
     return NextResponse.json({ success: true, message: '删除成功' })
   } catch (error) {
@@ -51,15 +54,23 @@ export async function PUT(request: Request) {
       return NextResponse.json({ success: false, error: '缺少新日期' }, { status: 400 })
     }
 
-    const existingBatch = await getBatchByDate(newDate)
+    const currentBatch = await getBatchById(id)
+    if (!currentBatch) {
+      return NextResponse.json({ success: false, error: '批次不存在' }, { status: 404 })
+    }
+
+    const existingBatch = await getBatchByDate(newDate, currentBatch.group_id)
     console.log('Existing batch for date:', existingBatch)
     
     if (existingBatch && String(existingBatch.id) !== String(id)) {
       return NextResponse.json({ success: false, error: '该日期已有数据' }, { status: 400 })
     }
 
+    const oldDate = currentBatch.batch_date
     const result = await updateBatchDate(id, newDate)
     console.log('Update result:', result)
+    const recalcFromDate = [oldDate, newDate].sort()[0]
+    await recalculateCompareResultsForGroup(currentBatch.group_id, recalcFromDate)
     
     return NextResponse.json({ success: true, message: '日期更新成功' })
   } catch (error) {

@@ -5,7 +5,8 @@ export async function GET(request: Request) {
   try {
     const url = new URL(request.url)
     const date = url.searchParams.get('date')
-    const pageData = await getComparePageData(date)
+    const groupId = url.searchParams.get('groupId')
+    const pageData = await getComparePageData(date, groupId)
     return NextResponse.json({ success: true, data: pageData })
   } catch (error) {
     console.error('Get compare page data error:', error)

@@ -473,6 +473,20 @@ export async function getBatchByDate(date: string, groupId?: string | number | n
   }
 }
 
+export async function getBatchById(batchId: string | number): Promise<StockBatch | null> {
+  try {
+    const client = await getClient()
+    const result = await client.query(
+      'SELECT id::text as id, group_id::text as group_id, batch_date::text as batch_date, file_name, total_count, created_at::text as created_at FROM stock_batches WHERE id = $1',
+      [batchId]
+    )
+    return result.rows[0] || null
+  } catch (error) {
+    console.error('Error getting batch by id:', error)
+    return null
+  }
+}
+
 export async function deleteBatch(batchId: number): Promise<boolean> {
   try {
     const client = await getClient()

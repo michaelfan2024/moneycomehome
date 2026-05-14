@@ -5,10 +5,11 @@ export async function GET(request: Request) {
   try {
     const url = new URL(request.url)
     const date = url.searchParams.get('date')
+    const groupId = url.searchParams.get('groupId')
 
     let targetDate = date
     if (!date) {
-      const latestBatch = await getLatestBatch()
+      const latestBatch = await getLatestBatch(groupId)
       if (latestBatch) {
         targetDate = latestBatch.batch_date
       }
@@ -20,7 +21,7 @@ export async function GET(request: Request) {
 
     const normalizedDate = targetDate.split('T')[0]
 
-    const results = await getCompareResultsByDate(normalizedDate)
+    const results = await getCompareResultsByDate(normalizedDate, groupId)
     return NextResponse.json({ success: true, data: results })
   } catch (error) {
     console.error('Get compare results error:', error)

@@ -4,7 +4,9 @@ import { getStockDetail } from '../../../../lib/db'
 export async function GET(request: Request, { params }: { params: Promise<{ code: string }> }) {
   try {
     const { code } = await params
-    const detail = await getStockDetail(code)
+    const url = new URL(request.url)
+    const groupId = url.searchParams.get('groupId')
+    const detail = await getStockDetail(code, groupId)
     
     if (!detail) {
       return NextResponse.json({ success: false, error: '股票不存在' }, { status: 404 })

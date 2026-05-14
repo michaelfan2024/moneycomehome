@@ -6,13 +6,14 @@ export async function GET(request: Request) {
     await ensureTables()
     const url = new URL(request.url)
     const batchId = url.searchParams.get('batchId')
+    const groupId = url.searchParams.get('groupId')
 
     if (batchId) {
       const items = await getStockItemsByBatch(parseInt(batchId))
       return NextResponse.json({ success: true, data: items })
     }
 
-    const latestBatch = await getLatestBatch()
+    const latestBatch = await getLatestBatch(groupId)
     if (latestBatch) {
       const items = await getStockItemsByBatch(parseInt(String(latestBatch.id)))
       return NextResponse.json({ success: true, data: items })

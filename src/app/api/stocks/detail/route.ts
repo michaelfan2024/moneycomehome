@@ -6,12 +6,13 @@ export async function GET(request: Request) {
     await ensureTables()
     const url = new URL(request.url)
     const stockCode = url.searchParams.get('code')
+    const groupId = url.searchParams.get('groupId')
 
     if (!stockCode) {
       return NextResponse.json({ success: false, error: '缺少股票代码参数' }, { status: 400 })
     }
 
-    const detail = await getStockDetail(stockCode)
+    const detail = await getStockDetail(stockCode, groupId)
     return NextResponse.json({ success: true, data: detail })
   } catch (error) {
     console.error('Get stock detail error:', error)

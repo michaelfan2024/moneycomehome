@@ -1,5 +1,14 @@
+export interface StockGroup {
+  id: string
+  name: string
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
 export interface StockBatch {
   id: string
+  group_id?: string
   batch_date: string
   file_name: string
   total_count: number
@@ -21,6 +30,8 @@ export type StockStatus = 'first_seen' | 'new' | 'continued' | 'removed' | 'reap
 
 export interface StockCompareResult {
   id: string
+  batch_id?: string
+  group_id?: string
   trade_date: string
   stock_code: string
   stock_name: string

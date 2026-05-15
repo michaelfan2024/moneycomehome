@@ -2,7 +2,7 @@
 
 import { useMemo, useState, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { enrichStockMetadata, getRanking, getStockGroups } from '../../lib/api'
+import { enrichStockFinance, enrichStockMetadata, getRanking, getStockGroups } from '../../lib/api'
 import {
   buildRankingFilterSummary,
   exportRankingRowsToCsv,
@@ -55,6 +55,7 @@ export default function RankingContent() {
   const [sort, setSort] = useState<RankingTableSort>(DEFAULT_SORT)
   const [loading, setLoading] = useState(true)
   const [enriching, setEnriching] = useState(false)
+  const [enrichingFinance, setEnrichingFinance] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
 
@@ -141,6 +142,13 @@ export default function RankingContent() {
     [activeFilters, appliedGroupName, appliedMinDays]
   )
   const metadataReadyCount = results.filter((row) => row.industry || (row.concepts || []).length > 0).length
+  const financeReadyCount = results.filter((row) => [
+    row.finance?.netProfit,
+    row.finance?.netProfitYoy,
+    row.finance?.revenue,
+    row.finance?.revenueYoy,
+    row.finance?.roe,
+  ].some((value) => typeof value === 'number' && Number.isFinite(value))).length
   const hasActiveFilters = Boolean(
     appliedSearchText
     || activeFilters.industries?.length
@@ -236,6 +244,33 @@ export default function RankingContent() {
       setMessage('补全行业/概念失败')
     } finally {
       setEnriching(false)
+    }
+  }
+
+  const handleEnrichFinance = async () => {
+    if (results.length === 0) return
+
+    setEnrichingFinance(true)
+    setMessage(null)
+    try {
+      const response = await enrichStockFinance(results.map((row) => ({
+        stock_code: row.stock_code,
+        stock_name: row.stock_name,
+      })))
+
+      if (!response.success) {
+        setMessage(response.error || '补全财务数据失败')
+        return
+      }
+
+      const refreshed = await getRanking(appliedMinDays, appliedGroupId || undefined)
+      setResults(refreshed.data || [])
+      setMessage(`财务补全完成：请求 ${response.data?.requested || 0}，缓存 ${response.data?.cached || 0}，新增 ${response.data?.fetched || 0}，失败 ${response.data?.failed || 0}`)
+    } catch (error) {
+      console.error('Finance enrichment failed:', error)
+      setMessage('补全财务数据失败')
+    } finally {
+      setEnrichingFinance(false)
     }
   }
 
@@ -450,6 +485,9 @@ export default function RankingContent() {
               <span className="text-sm text-[var(--text-muted)]">
                 行业/概念已补全 {metadataReadyCount} / {results.length}
               </span>
+              <span className="text-sm text-[var(--text-muted)]">
+                财务已补全 {financeReadyCount} / {results.length}
+              </span>
             </div>
           </div>
         </div>
@@ -461,6 +499,13 @@ export default function RankingContent() {
             className="px-4 py-2 border border-[var(--border-color)] text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-card-hover)] transition-colors disabled:opacity-50"
           >
             {enriching ? '补全中...' : '补全行业/概念数据'}
+          </button>
+          <button
+            onClick={handleEnrichFinance}
+            disabled={enrichingFinance || results.length === 0}
+            className="px-4 py-2 border border-[var(--border-color)] text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-card-hover)] transition-colors disabled:opacity-50"
+          >
+            {enrichingFinance ? '补全中...' : '补全财务数据'}
           </button>
           <button
             onClick={handleExportCsv}

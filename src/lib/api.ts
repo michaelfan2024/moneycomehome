@@ -191,3 +191,23 @@ export async function enrichStockMetadata(stocks: Array<{ stock_code: string; st
   })
   return response.json()
 }
+
+export async function enrichStockFinance(stocks: Array<{ stock_code: string; stock_name: string }>): Promise<{
+  success: boolean
+  data?: {
+    requested: number
+    cached: number
+    fetched: number
+    failed: number
+  }
+  error?: string
+}> {
+  const response = await fetch('/api/stocks/finance/enrich', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ stocks }),
+  })
+  return response.json()
+}

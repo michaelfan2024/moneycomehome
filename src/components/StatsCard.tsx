@@ -22,7 +22,7 @@ export default function StatsCard({ title, value, change, icon, trend = 'stable'
       <div className="flex items-start justify-between">
         <div className="space-y-2">
           <p className="text-sm font-medium text-[var(--text-secondary)]">{title}</p>
-          <p className="text-4xl font-bold text-white">
+          <p className="text-4xl font-bold text-[var(--text-primary)]">
             {value.toLocaleString()}
           </p>
           {change !== undefined && (

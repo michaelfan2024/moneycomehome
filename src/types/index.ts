@@ -42,6 +42,44 @@ export interface StockCompareResult {
   created_at: string
 }
 
+export interface StockMetadata {
+  stock_code: string
+  stock_name: string
+  industry?: string | null
+  concepts: string[]
+  source?: string | null
+  fetched_at?: string
+  updated_at?: string
+}
+
+export interface RankingFinanceSnapshot {
+  reportDate?: string
+  reportType?: string
+  netProfitYoy?: number | null
+  revenueYoy?: number | null
+  roe?: number | null
+}
+
+export interface EnrichedRankingResult extends StockCompareResult {
+  industry?: string | null
+  concepts?: string[]
+  finance?: RankingFinanceSnapshot
+}
+
+export interface RankingFilters {
+  industries?: string[]
+  concepts?: string[]
+  netProfitGrowthMin?: number | null
+  revenueGrowthMin?: number | null
+  roeMin?: number | null
+}
+
+export interface RankingExportContext {
+  groupName?: string
+  minDays: number
+  filters: RankingFilters
+}
+
 export interface StockDetail {
   stock_code: string
   stock_name: string

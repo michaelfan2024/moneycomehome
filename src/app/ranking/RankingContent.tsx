@@ -2,28 +2,57 @@
 
 import { useMemo, useState, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import StockTable from '../../components/StockTable'
 import { enrichStockMetadata, getRanking, getStockGroups } from '../../lib/api'
 import {
   buildRankingFilterSummary,
   exportRankingRowsToCsv,
-  filterRankingRows,
   getRankingFilterOptions,
 } from '../../lib/ranking-filters'
+import {
+  filterRankingTableRows,
+  formatFinanceAmount,
+  formatPercent,
+  sortRankingTableRows,
+  type RankingTableSort,
+  type RankingTableSortKey,
+} from '../../lib/ranking-table'
 import type { EnrichedRankingResult, RankingFilters, StockGroup } from '../../types'
+
+const DEFAULT_SORT: RankingTableSort = { key: 'continuous_count', direction: 'desc' }
+
+function parseNumberInput(value: string): number | undefined {
+  if (!value.trim()) return undefined
+
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function getReportPeriod(row: EnrichedRankingResult): string {
+  if (row.finance?.reportType && row.finance?.reportDate) {
+    return `${row.finance.reportType} ${row.finance.reportDate.slice(0, 10)}`
+  }
+
+  return row.finance?.reportType || row.finance?.reportDate?.slice(0, 10) || '-'
+}
 
 export default function RankingContent() {
   const searchParams = useSearchParams()
   const router = useRouter()
   const [groups, setGroups] = useState<StockGroup[]>([])
   const [selectedGroupId, setSelectedGroupId] = useState('')
+  const [appliedGroupId, setAppliedGroupId] = useState('')
   const [results, setResults] = useState<EnrichedRankingResult[]>([])
   const [minDays, setMinDays] = useState(2)
+  const [appliedMinDays, setAppliedMinDays] = useState(2)
+  const [searchText, setSearchText] = useState('')
+  const [appliedSearchText, setAppliedSearchText] = useState('')
+  const [industrySearch, setIndustrySearch] = useState('')
   const [selectedIndustries, setSelectedIndustries] = useState<string[]>([])
-  const [selectedConcepts, setSelectedConcepts] = useState<string[]>([])
+  const [activeFilters, setActiveFilters] = useState<RankingFilters>({})
   const [netProfitGrowthMin, setNetProfitGrowthMin] = useState('')
   const [revenueGrowthMin, setRevenueGrowthMin] = useState('')
   const [roeMin, setRoeMin] = useState('')
+  const [sort, setSort] = useState<RankingTableSort>(DEFAULT_SORT)
   const [loading, setLoading] = useState(true)
   const [enriching, setEnriching] = useState(false)
   const [generating, setGenerating] = useState(false)
@@ -32,13 +61,17 @@ export default function RankingContent() {
   useEffect(() => {
     const urlMinDays = searchParams.get('minDays')
     const urlGroupId = searchParams.get('groupId')
+
     if (urlGroupId) {
       setSelectedGroupId(urlGroupId)
+      setAppliedGroupId(urlGroupId)
     }
+
     if (urlMinDays) {
       const parsed = parseInt(urlMinDays, 10)
       if (!isNaN(parsed) && parsed >= 2) {
         setMinDays(parsed)
+        setAppliedMinDays(parsed)
       }
     }
   }, [searchParams])
@@ -47,8 +80,11 @@ export default function RankingContent() {
     const fetchGroups = async () => {
       const result = await getStockGroups()
       const nextGroups = result.data || []
+      const defaultGroupId = nextGroups[0]?.id || ''
+
       setGroups(nextGroups)
-      setSelectedGroupId((current) => current || nextGroups[0]?.id || '')
+      setSelectedGroupId((current) => current || defaultGroupId)
+      setAppliedGroupId((current) => current || defaultGroupId)
     }
 
     fetchGroups()
@@ -56,9 +92,14 @@ export default function RankingContent() {
 
   useEffect(() => {
     const fetchData = async () => {
+      if (!appliedGroupId) {
+        setLoading(false)
+        return
+      }
+
       setLoading(true)
       try {
-        const result = await getRanking(minDays, selectedGroupId || undefined)
+        const result = await getRanking(appliedMinDays, appliedGroupId)
         setResults(result.data || [])
       } catch (error) {
         console.error('Error fetching ranking:', error)
@@ -68,7 +109,7 @@ export default function RankingContent() {
     }
 
     fetchData()
-  }, [minDays, selectedGroupId])
+  }, [appliedMinDays, appliedGroupId])
 
   const minDaysOptions = [
     { value: 2, label: '2天及以上' },
@@ -78,44 +119,97 @@ export default function RankingContent() {
   ]
 
   const selectedGroup = groups.find((group) => group.id === selectedGroupId)
-  const selectedGroupName = selectedGroup?.name || ''
+  const appliedGroup = groups.find((group) => group.id === appliedGroupId)
+  const appliedGroupName = appliedGroup?.name || selectedGroup?.name || ''
   const filterOptions = useMemo(() => getRankingFilterOptions(results), [results])
+  const visibleIndustryOptions = useMemo(() => {
+    const keyword = industrySearch.trim().toLowerCase()
+    return filterOptions.industries.filter((industry) => industry.toLowerCase().includes(keyword))
+  }, [filterOptions.industries, industrySearch])
 
-  const activeFilters = useMemo<RankingFilters>(() => {
-    const filters: RankingFilters = {}
-    if (selectedIndustries.length) filters.industries = selectedIndustries
-    if (selectedConcepts.length) filters.concepts = selectedConcepts
+  const visibleResults = useMemo(() => {
+    const filtered = filterRankingTableRows(results, {
+      ...activeFilters,
+      search: appliedSearchText,
+    })
 
-    const netProfit = Number(netProfitGrowthMin)
-    if (netProfitGrowthMin.trim() && Number.isFinite(netProfit)) {
-      filters.netProfitGrowthMin = netProfit
-    }
+    return sortRankingTableRows(filtered, sort)
+  }, [activeFilters, appliedSearchText, results, sort])
 
-    const revenue = Number(revenueGrowthMin)
-    if (revenueGrowthMin.trim() && Number.isFinite(revenue)) {
-      filters.revenueGrowthMin = revenue
-    }
-
-    const roe = Number(roeMin)
-    if (roeMin.trim() && Number.isFinite(roe)) {
-      filters.roeMin = roe
-    }
-
-    return filters
-  }, [selectedConcepts, selectedIndustries, netProfitGrowthMin, revenueGrowthMin, roeMin])
-
-  const filteredResults = useMemo(
-    () => filterRankingRows(results, activeFilters),
-    [activeFilters, results]
-  )
   const filterSummary = useMemo(
-    () => buildRankingFilterSummary({ groupName: selectedGroupName, minDays, filters: activeFilters }),
-    [activeFilters, minDays, selectedGroupName]
+    () => buildRankingFilterSummary({ groupName: appliedGroupName, minDays: appliedMinDays, filters: activeFilters }),
+    [activeFilters, appliedGroupName, appliedMinDays]
   )
   const metadataReadyCount = results.filter((row) => row.industry || (row.concepts || []).length > 0).length
+  const hasActiveFilters = Boolean(
+    appliedSearchText
+    || activeFilters.industries?.length
+    || activeFilters.netProfitGrowthMin !== undefined
+    || activeFilters.revenueGrowthMin !== undefined
+    || activeFilters.roeMin !== undefined
+  )
 
-  const readMultiSelect = (select: HTMLSelectElement): string[] => {
-    return Array.from(select.selectedOptions).map((option) => option.value)
+  const toggleIndustry = (industry: string) => {
+    setSelectedIndustries((current) => (
+      current.includes(industry)
+        ? current.filter((item) => item !== industry)
+        : [...current, industry]
+    ))
+  }
+
+  const handleApplyQuery = () => {
+    setAppliedGroupId(selectedGroupId)
+    setAppliedMinDays(minDays)
+    setSort(DEFAULT_SORT)
+
+    const params = new URLSearchParams()
+    if (selectedGroupId) params.set('groupId', selectedGroupId)
+    params.set('minDays', String(minDays))
+    router.replace(`/ranking?${params.toString()}`)
+  }
+
+  const handleApplyFilters = () => {
+    const nextFilters: RankingFilters = {}
+    const netProfit = parseNumberInput(netProfitGrowthMin)
+    const revenue = parseNumberInput(revenueGrowthMin)
+    const roe = parseNumberInput(roeMin)
+
+    if (selectedIndustries.length) nextFilters.industries = selectedIndustries
+    if (netProfit !== undefined) nextFilters.netProfitGrowthMin = netProfit
+    if (revenue !== undefined) nextFilters.revenueGrowthMin = revenue
+    if (roe !== undefined) nextFilters.roeMin = roe
+
+    setActiveFilters(nextFilters)
+    setAppliedSearchText(searchText.trim())
+    setMessage(null)
+  }
+
+  const handleResetFilters = () => {
+    setSearchText('')
+    setAppliedSearchText('')
+    setIndustrySearch('')
+    setSelectedIndustries([])
+    setActiveFilters({})
+    setNetProfitGrowthMin('')
+    setRevenueGrowthMin('')
+    setRoeMin('')
+    setSort(DEFAULT_SORT)
+    setMessage(null)
+  }
+
+  const handleSort = (key: RankingTableSortKey) => {
+    setSort((current) => {
+      if (current.key !== key) {
+        return { key, direction: 'desc' }
+      }
+
+      return { key, direction: current.direction === 'desc' ? 'asc' : 'desc' }
+    })
+  }
+
+  const getSortLabel = (key: RankingTableSortKey) => {
+    if (sort.key !== key) return '↕'
+    return sort.direction === 'desc' ? '↓' : '↑'
   }
 
   const handleEnrichMetadata = async () => {
@@ -134,7 +228,7 @@ export default function RankingContent() {
         return
       }
 
-      const refreshed = await getRanking(minDays, selectedGroupId || undefined)
+      const refreshed = await getRanking(appliedMinDays, appliedGroupId || undefined)
       setResults(refreshed.data || [])
       setMessage(`补全完成：请求 ${response.data?.requested || 0}，缓存 ${response.data?.cached || 0}，新增 ${response.data?.fetched || 0}，失败 ${response.data?.failed || 0}`)
     } catch (error) {
@@ -146,33 +240,34 @@ export default function RankingContent() {
   }
 
   const handleExportCsv = () => {
-    if (filteredResults.length === 0) return
+    if (visibleResults.length === 0) return
 
-    const csv = exportRankingRowsToCsv(filteredResults, {
-      groupName: selectedGroupName,
-      minDays,
+    const csv = exportRankingRowsToCsv(visibleResults, {
+      groupName: appliedGroupName,
+      minDays: appliedMinDays,
       filters: activeFilters,
     })
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
-    link.href = URL.createObjectURL(blob)
-    link.download = `${new Date().toISOString().split('T')[0]}_连续${minDays}天榜单.csv`
+    link.href = url
+    link.download = `${new Date().toISOString().split('T')[0]}_连续${appliedMinDays}天榜单.csv`
     link.click()
-    URL.revokeObjectURL(link.href)
+    URL.revokeObjectURL(url)
   }
 
   const handleGenerateReport = async () => {
-    if (filteredResults.length === 0) return
-    if (filteredResults.length > 50 && !window.confirm(`当前将基于 ${filteredResults.length} 只股票生成报告，可能耗时较长，是否继续？`)) {
+    if (visibleResults.length === 0) return
+    if (visibleResults.length > 50 && !window.confirm(`当前将基于 ${visibleResults.length} 只股票生成报告，可能耗时较长，是否继续？`)) {
       return
     }
 
     setGenerating(true)
     setMessage(null)
     const date = new Date().toISOString().split('T')[0]
-    const reportTitle = selectedIndustries.length === 1
-      ? `${date} ${selectedIndustries[0]}连续${minDays}天+股票AI分析报告`
-      : `${date} 连续${minDays}天+股票AI分析报告`
+    const reportTitle = activeFilters.industries?.length === 1
+      ? `${date} ${activeFilters.industries[0]}连续${appliedMinDays}天+股票AI分析报告`
+      : `${date} 连续${appliedMinDays}天+股票AI分析报告`
 
     try {
       const response = await fetch('/api/report/generate', {
@@ -180,7 +275,7 @@ export default function RankingContent() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           date,
-          stocks: filteredResults,
+          stocks: visibleResults,
           sourceType: 'ranking',
           filterSummary,
           reportTitle,
@@ -223,13 +318,13 @@ export default function RankingContent() {
       </div>
 
       <div className="card p-4">
-        <div className="flex flex-wrap gap-4 items-center">
+        <div className="flex flex-wrap gap-4 items-end">
           <div>
             <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">分组</label>
             <select
               value={selectedGroupId}
               onChange={(e) => setSelectedGroupId(e.target.value)}
-              className="select-field w-auto"
+              className="select-field w-64"
             >
               {groups.map((group) => (
                 <option key={group.id} value={group.id}>{group.name}</option>
@@ -238,11 +333,11 @@ export default function RankingContent() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">筛选条件</label>
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">连续条件</label>
             <select
               value={minDays}
               onChange={(e) => setMinDays(Number(e.target.value))}
-              className="select-field w-auto"
+              className="select-field w-48"
             >
               {minDaysOptions.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -251,80 +346,115 @@ export default function RankingContent() {
               ))}
             </select>
           </div>
-          <div className="ml-auto">
-            <span className="text-sm text-[var(--text-muted)]">🏆 当前显示 {filteredResults.length} / {results.length} 只股票</span>
+
+          <button
+            onClick={handleApplyQuery}
+            disabled={!selectedGroupId}
+            className="px-5 py-3 bg-[var(--primary-color)] text-black rounded-lg hover:bg-[var(--primary-dark)] transition-colors disabled:opacity-50"
+          >
+            查询榜单
+          </button>
+
+          <div className="ml-auto text-sm text-[var(--text-muted)] pb-3">
+            当前显示 {visibleResults.length} / {results.length} 只股票
           </div>
         </div>
       </div>
 
       <div className="card p-4">
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_1.3fr_2fr] gap-5">
           <div>
-            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">行业</label>
-            <select
-              multiple
-              value={selectedIndustries}
-              onChange={(event) => setSelectedIndustries(readMultiSelect(event.currentTarget))}
-              className="select-field h-28"
-            >
-              {filterOptions.industries.map((industry) => (
-                <option key={industry} value={industry}>{industry}</option>
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">搜索</label>
+            <input
+              type="search"
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+              className="input-field"
+              placeholder="代码、名称、行业、概念"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">行业筛选</label>
+            <input
+              type="search"
+              value={industrySearch}
+              onChange={(event) => setIndustrySearch(event.target.value)}
+              className="input-field mb-2"
+              placeholder="搜索行业"
+            />
+            <div className="h-28 overflow-y-auto border border-[var(--border-color)] rounded-lg p-2 space-y-1 bg-[var(--bg-dark)]">
+              {visibleIndustryOptions.length === 0 && (
+                <p className="text-sm text-[var(--text-muted)] px-2 py-1">暂无行业可筛选</p>
+              )}
+              {visibleIndustryOptions.map((industry) => (
+                <label key={industry} className="flex items-center gap-2 text-sm text-[var(--text-secondary)] px-2 py-1 rounded hover:bg-[var(--bg-card-hover)]">
+                  <input
+                    type="checkbox"
+                    checked={selectedIndustries.includes(industry)}
+                    onChange={() => toggleIndustry(industry)}
+                  />
+                  <span className="truncate">{industry}</span>
+                </label>
               ))}
-            </select>
+            </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">概念</label>
-            <select
-              multiple
-              value={selectedConcepts}
-              onChange={(event) => setSelectedConcepts(readMultiSelect(event.currentTarget))}
-              className="select-field h-28"
-            >
-              {filterOptions.concepts.map((concept) => (
-                <option key={concept} value={concept}>{concept}</option>
-              ))}
-            </select>
-          </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">净利润同比 ≥ %</label>
+                <input
+                  type="number"
+                  value={netProfitGrowthMin}
+                  onChange={(event) => setNetProfitGrowthMin(event.target.value)}
+                  className="input-field"
+                  placeholder="50"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">营收同比 ≥ %</label>
+                <input
+                  type="number"
+                  value={revenueGrowthMin}
+                  onChange={(event) => setRevenueGrowthMin(event.target.value)}
+                  className="input-field"
+                  placeholder="30"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">ROE ≥ %</label>
+                <input
+                  type="number"
+                  value={roeMin}
+                  onChange={(event) => setRoeMin(event.target.value)}
+                  className="input-field"
+                  placeholder="10"
+                />
+              </div>
+            </div>
 
-          <div>
-            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">净利润同比 ≥ %</label>
-            <input
-              type="number"
-              value={netProfitGrowthMin}
-              onChange={(event) => setNetProfitGrowthMin(event.target.value)}
-              className="input-field"
-              placeholder="50"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">营收同比 ≥ %</label>
-            <input
-              type="number"
-              value={revenueGrowthMin}
-              onChange={(event) => setRevenueGrowthMin(event.target.value)}
-              className="input-field"
-              placeholder="30"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">ROE ≥ %</label>
-            <input
-              type="number"
-              value={roeMin}
-              onChange={(event) => setRoeMin(event.target.value)}
-              className="input-field"
-              placeholder="10"
-            />
+            <div className="flex flex-wrap items-center gap-3 mt-4">
+              <button
+                onClick={handleApplyFilters}
+                className="px-5 py-2 bg-[var(--primary-color)] text-black rounded-lg hover:bg-[var(--primary-dark)] transition-colors"
+              >
+                应用筛选
+              </button>
+              <button
+                onClick={handleResetFilters}
+                className="px-4 py-2 border border-[var(--border-color)] text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-card-hover)] transition-colors"
+              >
+                重置
+              </button>
+              <span className="text-sm text-[var(--text-muted)]">
+                行业/概念已补全 {metadataReadyCount} / {results.length}
+              </span>
+            </div>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3 mt-4">
-          <span className="text-sm text-[var(--text-muted)]">
-            行业/概念已补全 {metadataReadyCount} / {results.length}
-          </span>
+        <div className="flex flex-wrap items-center gap-3 mt-5 pt-4 border-t border-[var(--border-color)]">
           <button
             onClick={handleEnrichMetadata}
             disabled={enriching || results.length === 0}
@@ -334,14 +464,14 @@ export default function RankingContent() {
           </button>
           <button
             onClick={handleExportCsv}
-            disabled={filteredResults.length === 0}
+            disabled={visibleResults.length === 0}
             className="px-4 py-2 bg-[var(--primary-color)] text-black rounded-lg hover:bg-[var(--primary-dark)] transition-colors disabled:opacity-50"
           >
-            导出CSV ({filteredResults.length}条)
+            导出CSV ({visibleResults.length}条)
           </button>
           <button
             onClick={handleGenerateReport}
-            disabled={generating || filteredResults.length === 0}
+            disabled={generating || visibleResults.length === 0}
             className="px-4 py-2 bg-gradient-to-r from-[var(--primary-color)] to-red-500 text-black rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
           >
             {generating ? '生成中...' : '生成AI分析报告'}
@@ -350,36 +480,102 @@ export default function RankingContent() {
         </div>
       </div>
 
-      {filteredResults.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-          <div className="stat-card">
-            <p className="text-sm text-[var(--text-secondary)]">冠军 🥇</p>
-            <p className="text-xl font-bold text-[var(--text-primary)]">{filteredResults[0]?.stock_name}</p>
-            <p className="text-sm text-[var(--primary-color)]">{filteredResults[0]?.continuous_count} 天连续</p>
-          </div>
-          {filteredResults.length > 1 && (
-            <div className="stat-card">
-              <p className="text-sm text-[var(--text-secondary)]">亚军 🥈</p>
-              <p className="text-xl font-bold text-[var(--text-primary)]">{filteredResults[1]?.stock_name}</p>
-              <p className="text-sm text-[var(--primary-color)]">{filteredResults[1]?.continuous_count} 天连续</p>
-            </div>
-          )}
-          {filteredResults.length > 2 && (
-            <div className="stat-card">
-              <p className="text-sm text-[var(--text-secondary)]">季军 🥉</p>
-              <p className="text-xl font-bold text-[var(--text-primary)]">{filteredResults[2]?.stock_name}</p>
-              <p className="text-sm text-[var(--primary-color)]">{filteredResults[2]?.continuous_count} 天连续</p>
+      <div className="card overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1180px]">
+            <thead className="bg-[var(--bg-dark)]">
+              <tr>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-[var(--text-muted)] uppercase">股票代码</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-[var(--text-muted)] uppercase">股票名称</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-[var(--text-muted)] uppercase">
+                  <button onClick={() => handleSort('continuous_count')} className="hover:text-[var(--primary-color)]">
+                    连续天数 {getSortLabel('continuous_count')}
+                  </button>
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-[var(--text-muted)] uppercase">
+                  <button onClick={() => handleSort('total_appear_count')} className="hover:text-[var(--primary-color)]">
+                    总出现 {getSortLabel('total_appear_count')}
+                  </button>
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-[var(--text-muted)] uppercase">行业</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-[var(--text-muted)] uppercase">概念</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-[var(--text-muted)] uppercase">最近财报</th>
+                <th className="px-4 py-3 text-right text-xs font-semibold text-[var(--text-muted)] uppercase">
+                  <button onClick={() => handleSort('netProfit')} className="hover:text-[var(--primary-color)]">
+                    净利润 {getSortLabel('netProfit')}
+                  </button>
+                </th>
+                <th className="px-4 py-3 text-right text-xs font-semibold text-[var(--text-muted)] uppercase">
+                  <button onClick={() => handleSort('netProfitYoy')} className="hover:text-[var(--primary-color)]">
+                    净利润同比 {getSortLabel('netProfitYoy')}
+                  </button>
+                </th>
+                <th className="px-4 py-3 text-right text-xs font-semibold text-[var(--text-muted)] uppercase">
+                  <button onClick={() => handleSort('revenueYoy')} className="hover:text-[var(--primary-color)]">
+                    营收同比 {getSortLabel('revenueYoy')}
+                  </button>
+                </th>
+                <th className="px-4 py-3 text-right text-xs font-semibold text-[var(--text-muted)] uppercase">
+                  <button onClick={() => handleSort('roe')} className="hover:text-[var(--primary-color)]">
+                    ROE {getSortLabel('roe')}
+                  </button>
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-[var(--text-muted)] uppercase">操作</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--border-color)]/50">
+              {visibleResults.map((row) => (
+                <tr
+                  key={`${row.batch_id}-${row.stock_code}`}
+                  className="hover:bg-[var(--bg-card-hover)] transition-colors duration-150"
+                >
+                  <td className="px-4 py-3 text-sm font-mono text-[var(--text-primary)]">{row.stock_code}</td>
+                  <td className="px-4 py-3 text-sm text-[var(--text-secondary)]">{row.stock_name}</td>
+                  <td className="px-4 py-3 text-sm text-[var(--primary-color)] font-medium">{row.continuous_count} 天</td>
+                  <td className="px-4 py-3 text-sm text-[var(--text-secondary)]">{row.total_appear_count} 次</td>
+                  <td className="px-4 py-3 text-sm text-[var(--text-secondary)]">{row.industry || '未分类'}</td>
+                  <td className="px-4 py-3 text-sm text-[var(--text-muted)] max-w-64 truncate" title={(row.concepts || []).join(' / ')}>
+                    {(row.concepts || []).slice(0, 3).join(' / ') || '-'}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-[var(--text-muted)]">{getReportPeriod(row)}</td>
+                  <td className="px-4 py-3 text-sm text-right text-[var(--text-secondary)]">{formatFinanceAmount(row.finance?.netProfit)}</td>
+                  <td className="px-4 py-3 text-sm text-right text-[var(--text-secondary)]">{formatPercent(row.finance?.netProfitYoy)}</td>
+                  <td className="px-4 py-3 text-sm text-right text-[var(--text-secondary)]">{formatPercent(row.finance?.revenueYoy)}</td>
+                  <td className="px-4 py-3 text-sm text-right text-[var(--text-secondary)]">{formatPercent(row.finance?.roe)}</td>
+                  <td className="px-4 py-3 text-sm">
+                    <button
+                      onClick={() => router.push(appliedGroupId ? `/detail/${row.stock_code}?groupId=${appliedGroupId}` : `/detail/${row.stock_code}`)}
+                      className="text-[var(--primary-color)] hover:text-[var(--primary-dark)] font-medium transition-colors"
+                    >
+                      查看详情
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {visibleResults.length === 0 && (
+            <div className="px-4 py-12 text-center">
+              <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-[var(--bg-dark)] flex items-center justify-center">
+                <span className="text-xl">📭</span>
+              </div>
+              <p className="text-[var(--text-muted)]">当前条件下暂无股票</p>
+              {hasActiveFilters && (
+                <div className="mt-3 space-y-3">
+                  <p className="text-sm text-[var(--text-secondary)]">{filterSummary}</p>
+                  <button
+                    onClick={handleResetFilters}
+                    className="px-4 py-2 border border-[var(--border-color)] text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-card-hover)] transition-colors"
+                  >
+                    清空筛选
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
-      )}
-
-      <StockTable
-        data={filteredResults}
-        columns={['stock_code', 'stock_name', 'continuous_count', 'total_appear_count']}
-        showActions
-        groupId={selectedGroupId}
-      />
+      </div>
     </div>
   )
 }

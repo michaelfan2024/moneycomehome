@@ -102,3 +102,34 @@ export function exportRankingRowsToCsv(rows: EnrichedRankingResult[], context: R
 
   return ['\uFEFF' + headers.join(','), ...lines].join('\n')
 }
+
+function parseListParam(value: string | null): string[] | undefined {
+  const values = (value || '').split(',').map((item) => item.trim()).filter(Boolean)
+  return values.length > 0 ? values : undefined
+}
+
+function parseNumberParam(value: string | null): number | undefined {
+  if (value === null || value.trim() === '') {
+    return undefined
+  }
+
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+export function parseRankingFiltersFromParams(params: URLSearchParams): RankingFilters {
+  const filters: RankingFilters = {}
+  const industries = parseListParam(params.get('industries'))
+  const concepts = parseListParam(params.get('concepts'))
+  const netProfitGrowthMin = parseNumberParam(params.get('netProfitGrowthMin'))
+  const revenueGrowthMin = parseNumberParam(params.get('revenueGrowthMin'))
+  const roeMin = parseNumberParam(params.get('roeMin'))
+
+  if (industries) filters.industries = industries
+  if (concepts) filters.concepts = concepts
+  if (netProfitGrowthMin !== undefined) filters.netProfitGrowthMin = netProfitGrowthMin
+  if (revenueGrowthMin !== undefined) filters.revenueGrowthMin = revenueGrowthMin
+  if (roeMin !== undefined) filters.roeMin = roeMin
+
+  return filters
+}

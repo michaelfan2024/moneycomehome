@@ -4,6 +4,7 @@ import {
   exportRankingRowsToCsv,
   filterRankingRows,
   getRankingFilterOptions,
+  parseRankingFiltersFromParams,
 } from './ranking-filters'
 import type { EnrichedRankingResult, RankingFilters } from '../types'
 
@@ -105,5 +106,29 @@ describe('ranking filter options and export', () => {
         filters: { concepts: ['芯片', '人工智能'], roeMin: 10 },
       })
     ).toContain('连续5天+')
+  })
+})
+
+describe('parseRankingFiltersFromParams', () => {
+  it('parses list and numeric filters from URL parameters', () => {
+    const filters = parseRankingFiltersFromParams(
+      new URLSearchParams('industries=半导体,软件开发&concepts=芯片&netProfitGrowthMin=50&revenueGrowthMin=30&roeMin=10')
+    )
+
+    expect(filters).toEqual({
+      industries: ['半导体', '软件开发'],
+      concepts: ['芯片'],
+      netProfitGrowthMin: 50,
+      revenueGrowthMin: 30,
+      roeMin: 10,
+    })
+  })
+
+  it('ignores blank lists and invalid numeric filters', () => {
+    const filters = parseRankingFiltersFromParams(
+      new URLSearchParams('industries=&concepts=,&netProfitGrowthMin=abc&roeMin=')
+    )
+
+    expect(filters).toEqual({})
   })
 })

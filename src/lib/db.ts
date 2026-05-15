@@ -1,11 +1,12 @@
 import { Pool } from 'pg'
 import { randomUUID } from 'crypto'
-import type { StockBatch, StockPoolItem, StockCompareResult, StockDetail, DashboardStats, StockStatus, StockGroup, StockMetadata } from '../types'
+import type { StockBatch, StockPoolItem, StockCompareResult, StockDetail, DashboardStats, StockStatus, StockGroup, StockMetadata, EnrichedRankingResult, RankingFilters } from '../types'
 import { getCache, setCache, invalidateCache } from './cache'
 import type { ReportTemplateInput, ReportTemplateRecord } from './report-template'
 import type { EastmoneyFinanceSummary } from './eastmoney-finance'
 import type { ComparePageData, DashboardOverview } from './stocks-page-data'
 import { isStockGroupSchemaReady, type StockGroupSchemaReadiness } from './db-schema'
+import { filterRankingRows } from './ranking-filters'
 
 const databaseUrl = process.env.DATABASE_URL
 export const DEFAULT_STOCK_GROUP_NAME = '每日火车股票池'
@@ -1359,6 +1360,111 @@ export async function getContinuousRanking(minDays: number = 2, groupId?: string
     return result.rows
   } catch (error) {
     console.error('Error getting continuous ranking:', error)
+    return null
+  }
+}
+
+function toNullableNumber(value: unknown): number | null {
+  if (value === undefined || value === null || value === '') {
+    return null
+  }
+
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+export async function getEnrichedContinuousRanking(
+  minDays: number = 2,
+  groupId?: string | number | null,
+  filters: RankingFilters = {}
+): Promise<EnrichedRankingResult[] | null> {
+  const resolvedGroupId = await resolveGroupId(groupId)
+  if (!resolvedGroupId) {
+    return null
+  }
+
+  try {
+    const client = await getClient()
+    const result = await client.query(
+      `
+      WITH latest_batch AS (
+        SELECT id
+        FROM stock_batches
+        WHERE group_id = $2
+        ORDER BY batch_date DESC
+        LIMIT 1
+      )
+      SELECT
+        compare.id::text as id,
+        compare.batch_id::text as batch_id,
+        compare.group_id::text as group_id,
+        compare.trade_date::text as trade_date,
+        compare.stock_code,
+        compare.stock_name,
+        compare.status,
+        compare.continuous_count,
+        compare.total_appear_count,
+        compare.last_seen_date::text as last_seen_date,
+        compare.created_at::text as created_at,
+        metadata.industry,
+        metadata.concepts,
+        finance.report_date::text as finance_report_date,
+        finance.report_type as finance_report_type,
+        finance.net_profit_yoy as finance_net_profit_yoy,
+        finance.revenue_yoy as finance_revenue_yoy,
+        finance.roe as finance_roe
+      FROM stock_compare_results compare
+      LEFT JOIN stock_metadata metadata ON metadata.stock_code = compare.stock_code
+      LEFT JOIN LATERAL (
+        SELECT
+          report_date,
+          report_type,
+          net_profit_yoy,
+          revenue_yoy,
+          roe
+        FROM stock_financial_reports
+        WHERE stock_code = compare.stock_code
+        ORDER BY report_date DESC, fetched_at DESC
+        LIMIT 1
+      ) finance ON TRUE
+      WHERE compare.batch_id = (SELECT id FROM latest_batch)
+        AND compare.group_id = $2
+        AND compare.continuous_count >= $1
+      ORDER BY compare.continuous_count DESC, compare.total_appear_count DESC, compare.stock_code
+      `,
+      [minDays, resolvedGroupId]
+    )
+
+    const rows: EnrichedRankingResult[] = result.rows.map((row) => ({
+      id: row.id,
+      batch_id: row.batch_id,
+      group_id: row.group_id,
+      trade_date: row.trade_date,
+      stock_code: row.stock_code,
+      stock_name: row.stock_name,
+      status: row.status,
+      continuous_count: Number(row.continuous_count) || 0,
+      total_appear_count: Number(row.total_appear_count) || 0,
+      last_seen_date: row.last_seen_date,
+      created_at: row.created_at,
+      industry: row.industry || null,
+      concepts: normalizeMetadataConcepts(row.concepts),
+      finance: {
+        reportDate: row.finance_report_date || undefined,
+        reportType: row.finance_report_type || undefined,
+        netProfitYoy: toNullableNumber(row.finance_net_profit_yoy),
+        revenueYoy: toNullableNumber(row.finance_revenue_yoy),
+        roe: toNullableNumber(row.finance_roe),
+      },
+    }))
+
+    return filterRankingRows(rows, filters)
+  } catch (error) {
+    if (isMissingRelationError(error)) {
+      await ensureTables()
+      return getEnrichedContinuousRanking(minDays, groupId, filters)
+    }
+    console.error('Error getting enriched continuous ranking:', error)
     return null
   }
 }

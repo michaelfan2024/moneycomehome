@@ -1,4 +1,4 @@
-import type { StockBatch, StockPoolItem, StockCompareResult, StockDetail, DashboardStats, StockGroup, StockMetadata } from '../types'
+import type { StockBatch, StockPoolItem, StockCompareResult, StockDetail, DashboardStats, StockGroup, StockMetadata, EnrichedRankingResult, RankingFilters } from '../types'
 import type { ComparePageData, DashboardOverview } from './stocks-page-data'
 
 export async function uploadStockData(date: string, file: File, groupId?: string): Promise<{ success: boolean; count?: number; error?: string }> {
@@ -139,8 +139,35 @@ export async function getStockDetail(stockCode: string, groupId?: string): Promi
   return response.json()
 }
 
-export async function getRanking(minDays: number = 2, groupId?: string): Promise<{ success: boolean; data: StockCompareResult[] | null }> {
-  const response = await fetch(withGroupParam(`/api/stocks/ranking?minDays=${minDays}`, groupId))
+function appendRankingFilters(params: URLSearchParams, filters?: RankingFilters): void {
+  if (!filters) {
+    return
+  }
+  if (filters.industries?.length) {
+    params.set('industries', filters.industries.join(','))
+  }
+  if (filters.concepts?.length) {
+    params.set('concepts', filters.concepts.join(','))
+  }
+  if (filters.netProfitGrowthMin !== undefined && filters.netProfitGrowthMin !== null) {
+    params.set('netProfitGrowthMin', String(filters.netProfitGrowthMin))
+  }
+  if (filters.revenueGrowthMin !== undefined && filters.revenueGrowthMin !== null) {
+    params.set('revenueGrowthMin', String(filters.revenueGrowthMin))
+  }
+  if (filters.roeMin !== undefined && filters.roeMin !== null) {
+    params.set('roeMin', String(filters.roeMin))
+  }
+}
+
+export async function getRanking(
+  minDays: number = 2,
+  groupId?: string,
+  filters?: RankingFilters
+): Promise<{ success: boolean; data: EnrichedRankingResult[] | null }> {
+  const params = new URLSearchParams({ minDays: String(minDays) })
+  appendRankingFilters(params, filters)
+  const response = await fetch(withGroupParam(`/api/stocks/ranking?${params.toString()}`, groupId))
   return response.json()
 }
 

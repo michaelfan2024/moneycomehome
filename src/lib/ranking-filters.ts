@@ -84,7 +84,7 @@ export function buildRankingFilterSummary(context: RankingExportContext): string
 
 export function exportRankingRowsToCsv(rows: EnrichedRankingResult[], context: RankingExportContext): string {
   const summary = buildRankingFilterSummary(context)
-  const headers = ['股票代码', '股票名称', '连续天数', '总出现次数', '最近出现日期', '行业', '概念', '净利润同比', '营收同比', 'ROE', '分组', '筛选条件']
+  const headers = ['股票代码', '股票名称', '连续天数', '总出现次数', '最近出现日期', '行业', '概念', '净利润', '净利润同比', '营收同比', 'ROE', '分组', '筛选条件']
   const lines = rows.map((row) => [
     row.stock_code,
     row.stock_name,
@@ -93,6 +93,7 @@ export function exportRankingRowsToCsv(rows: EnrichedRankingResult[], context: R
     row.last_seen_date || row.trade_date,
     row.industry || '未分类',
     (row.concepts || []).join('/'),
+    row.finance?.netProfit ?? '',
     row.finance?.netProfitYoy ?? '',
     row.finance?.revenueYoy ?? '',
     row.finance?.roe ?? '',

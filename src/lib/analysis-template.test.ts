@@ -70,7 +70,7 @@ describe('buildPromptFromTemplate', () => {
           total_appear_count: 8,
           industry: '半导体',
           concepts: ['芯片'],
-          finance: { netProfitYoy: 60 }
+          finance: { netProfit: 120000000, netProfitYoy: 60 }
         }
       ],
       '2026-05-15',
@@ -86,6 +86,7 @@ describe('buildPromptFromTemplate', () => {
     expect(prompt).toContain('连续3天+；行业=半导体')
     expect(prompt).toContain('半导体A')
     expect(prompt).toContain('连续5天')
+    expect(prompt).toContain('净利润120000000')
     expect(prompt).not.toContain('今日新增股票')
     expect(prompt).toContain('禁止凭空声称')
   })

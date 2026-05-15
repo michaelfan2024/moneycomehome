@@ -23,7 +23,7 @@ const rows: EnrichedRankingResult[] = [
     created_at: '2026-05-15',
     industry: '半导体',
     concepts: ['芯片', '人工智能'],
-    finance: { netProfitYoy: 60, revenueYoy: 35, roe: 12 },
+    finance: { netProfit: 120000000, netProfitYoy: 60, revenueYoy: 35, roe: 12 },
   },
   {
     id: '2',
@@ -93,7 +93,9 @@ describe('ranking filter options and export', () => {
     })
 
     expect(csv).toContain('股票代码,股票名称,连续天数')
+    expect(csv).toContain('净利润,净利润同比')
     expect(csv).toContain('688001,半导体A,5')
+    expect(csv).toContain('120000000,60')
     expect(csv).toContain('半导体')
     expect(csv).toContain('净利润同比>=50%')
   })

@@ -1410,6 +1410,8 @@ export async function getEnrichedContinuousRanking(
         metadata.concepts,
         finance.report_date::text as finance_report_date,
         finance.report_type as finance_report_type,
+        finance.net_profit as finance_net_profit,
+        finance.revenue as finance_revenue,
         finance.net_profit_yoy as finance_net_profit_yoy,
         finance.revenue_yoy as finance_revenue_yoy,
         finance.roe as finance_roe
@@ -1419,6 +1421,8 @@ export async function getEnrichedContinuousRanking(
         SELECT
           report_date,
           report_type,
+          net_profit,
+          revenue,
           net_profit_yoy,
           revenue_yoy,
           roe
@@ -1452,7 +1456,9 @@ export async function getEnrichedContinuousRanking(
       finance: {
         reportDate: row.finance_report_date || undefined,
         reportType: row.finance_report_type || undefined,
+        netProfit: toNullableNumber(row.finance_net_profit),
         netProfitYoy: toNullableNumber(row.finance_net_profit_yoy),
+        revenue: toNullableNumber(row.finance_revenue),
         revenueYoy: toNullableNumber(row.finance_revenue_yoy),
         roe: toNullableNumber(row.finance_roe),
       },

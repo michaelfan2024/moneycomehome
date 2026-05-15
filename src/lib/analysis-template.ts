@@ -215,6 +215,7 @@ export function buildPromptFromTemplate(
     if (sourceType === 'ranking') {
       const concepts = Array.isArray(s.concepts) && s.concepts.length > 0 ? s.concepts.join('/') : '未提供'
       const financeParts = [
+        typeof s.finance?.netProfit === 'number' ? `净利润${s.finance.netProfit}` : '',
         typeof s.finance?.netProfitYoy === 'number' ? `净利润同比${s.finance.netProfitYoy}%` : '',
         typeof s.finance?.revenueYoy === 'number' ? `营收同比${s.finance.revenueYoy}%` : '',
         typeof s.finance?.roe === 'number' ? `ROE ${s.finance.roe}%` : '',

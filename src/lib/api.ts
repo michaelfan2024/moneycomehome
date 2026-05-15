@@ -1,4 +1,4 @@
-import type { StockBatch, StockPoolItem, StockCompareResult, StockDetail, DashboardStats, StockGroup } from '../types'
+import type { StockBatch, StockPoolItem, StockCompareResult, StockDetail, DashboardStats, StockGroup, StockMetadata } from '../types'
 import type { ComparePageData, DashboardOverview } from './stocks-page-data'
 
 export async function uploadStockData(date: string, file: File, groupId?: string): Promise<{ success: boolean; count?: number; error?: string }> {
@@ -141,5 +141,26 @@ export async function getStockDetail(stockCode: string, groupId?: string): Promi
 
 export async function getRanking(minDays: number = 2, groupId?: string): Promise<{ success: boolean; data: StockCompareResult[] | null }> {
   const response = await fetch(withGroupParam(`/api/stocks/ranking?minDays=${minDays}`, groupId))
+  return response.json()
+}
+
+export async function enrichStockMetadata(stocks: Array<{ stock_code: string; stock_name: string }>): Promise<{
+  success: boolean
+  data?: {
+    metadata: StockMetadata[]
+    requested: number
+    cached: number
+    fetched: number
+    failed: number
+  }
+  error?: string
+}> {
+  const response = await fetch('/api/stocks/metadata/enrich', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ stocks }),
+  })
   return response.json()
 }

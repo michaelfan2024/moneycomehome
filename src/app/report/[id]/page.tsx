@@ -10,6 +10,8 @@ interface Report {
   content: string
   stockCount: number
   createdAt: string
+  sourceType?: 'compare' | 'ranking'
+  filterSummary?: string
   publishedAt?: string
   publishedTo?: string
   financeSources?: Array<{
@@ -78,7 +80,7 @@ export default function ReportViewPage() {
     const blob = new Blob(['\uFEFF' + report.content], { type: 'text/markdown;charset=utf-8;' })
     const link = document.createElement('a')
     link.href = URL.createObjectURL(blob)
-    link.download = `${report.date}_新增股票AI分析报告.md`
+    link.download = `${report.title}.md`
     link.click()
   }
 
@@ -125,8 +127,11 @@ export default function ReportViewPage() {
               AI 分析报告
             </h1>
             <p className="text-[var(--text-secondary)] text-sm mt-1">
-              {report.date} · {report.stockCount}只新增股票
+              {report.date} · {report.stockCount}只{report.sourceType === 'ranking' ? '榜单' : '新增'}股票
             </p>
+            {report.filterSummary && (
+              <p className="text-[var(--text-muted)] text-xs mt-1">{report.filterSummary}</p>
+            )}
           </div>
         </div>
         <div className="flex gap-2 flex-wrap">

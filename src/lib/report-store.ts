@@ -10,6 +10,8 @@ export interface Report {
   content: string
   stockCount: number
   createdAt: string
+  sourceType?: 'compare' | 'ranking'
+  filterSummary?: string
   publishedAt?: string
   publishedTo?: string
   financeSources?: Array<{

@@ -8,7 +8,14 @@ import { getLatestFinancialReport, upsertFinancialReport } from '../../../../lib
 export async function POST(request: Request) {
   try {
     const body = await request.json()
-    const { date, stocks, template } = body
+    const {
+      date,
+      stocks,
+      template,
+      sourceType = 'compare',
+      filterSummary,
+      reportTitle,
+    } = body
 
     if (!date || !stocks || !Array.isArray(stocks)) {
       return NextResponse.json({ success: false, error: '参数错误' }, { status: 400 })
@@ -23,7 +30,10 @@ export async function POST(request: Request) {
       continuous_count: s.continuous_count || 1,
       total_appear_count: s.total_appear_count || 1,
       last_seen_date: s.last_seen_date,
-      created_at: s.created_at || new Date().toISOString()
+      created_at: s.created_at || new Date().toISOString(),
+      industry: s.industry,
+      concepts: s.concepts,
+      finance: s.finance,
     }))
 
     const financeSnapshots = await Promise.all(
@@ -46,7 +56,15 @@ export async function POST(request: Request) {
       .map((item) => toReportFinanceSource(item))
 
     const selectedTemplate: AnalysisTemplate = template || DEFAULT_TEMPLATE
-    const aiResult = await callAIAnalysis(stockResults, date, selectedTemplate, financeContext)
+    const normalizedSourceType = sourceType === 'ranking' ? 'ranking' : 'compare'
+    const title = reportTitle || (normalizedSourceType === 'ranking'
+      ? `${date} 连续榜单AI分析报告`
+      : `${date} 新增股票AI分析报告`)
+    const aiResult = await callAIAnalysis(stockResults, date, selectedTemplate, financeContext, {
+      sourceType: normalizedSourceType,
+      title,
+      filterSummary,
+    })
 
     if (!aiResult.success || !aiResult.content) {
       return NextResponse.json({ success: false, error: aiResult.error }, { status: 500 })
@@ -55,10 +73,12 @@ export async function POST(request: Request) {
     const report: Report = {
       id: aiResult.reportId!,
       date,
-      title: `${date} 新增股票AI分析报告`,
+      title,
       content: aiResult.content,
       stockCount: stockResults.length,
       createdAt: new Date().toISOString(),
+      sourceType: normalizedSourceType,
+      filterSummary,
       financeSources
     }
 

@@ -58,6 +58,37 @@ describe('buildPromptFromTemplate', () => {
     expect(prompt).toContain('正文不要整段加粗')
     expect(prompt).toContain('每个自然段不超过80个中文字符')
   })
+
+  it('builds a ranking report prompt without daily-new-stock wording', () => {
+    const prompt = buildPromptFromTemplate(
+      DEFAULT_TEMPLATE,
+      [
+        {
+          stock_code: '688001',
+          stock_name: '半导体A',
+          continuous_count: 5,
+          total_appear_count: 8,
+          industry: '半导体',
+          concepts: ['芯片'],
+          finance: { netProfitYoy: 60 }
+        }
+      ],
+      '2026-05-15',
+      undefined,
+      {
+        sourceType: 'ranking',
+        title: '连续3天+股票AI分析报告',
+        filterSummary: '连续3天+；行业=半导体'
+      }
+    )
+
+    expect(prompt).toContain('连续榜单')
+    expect(prompt).toContain('连续3天+；行业=半导体')
+    expect(prompt).toContain('半导体A')
+    expect(prompt).toContain('连续5天')
+    expect(prompt).not.toContain('今日新增股票')
+    expect(prompt).toContain('禁止凭空声称')
+  })
 })
 
 describe('template editing helpers', () => {

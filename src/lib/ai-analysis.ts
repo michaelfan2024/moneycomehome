@@ -1,6 +1,6 @@
 import { getAIConfig } from './config-store'
 import type { StockCompareResult } from '../types'
-import { buildPromptFromTemplate, DEFAULT_TEMPLATE, type AnalysisTemplate } from './analysis-template'
+import { buildPromptFromTemplate, DEFAULT_TEMPLATE, type AnalysisTemplate, type ReportPromptContext } from './analysis-template'
 
 interface StockAnalysis {
   stockCode: string
@@ -23,7 +23,8 @@ export async function callAIAnalysis(
   stocks: StockCompareResult[], 
   date: string,
   template: AnalysisTemplate = DEFAULT_TEMPLATE,
-  financeContext?: string
+  financeContext?: string,
+  reportContext?: ReportPromptContext
 ): Promise<AIAnalysisResult> {
   try {
     const config = getAIConfig()
@@ -31,7 +32,7 @@ export async function callAIAnalysis(
       return { success: false, error: 'AI配置未设置，请先在设置页面配置API Key' }
     }
 
-    const prompt = buildPromptFromTemplate(template, stocks, date, financeContext)
+    const prompt = buildPromptFromTemplate(template, stocks, date, financeContext, reportContext)
 
     let endpoint = ''
     let body: any = {}

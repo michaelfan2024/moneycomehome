@@ -10,6 +10,14 @@ export interface AnalysisTemplate {
   customPrompt?: string
 }
 
+export type ReportSourceType = 'compare' | 'ranking'
+
+export interface ReportPromptContext {
+  sourceType?: ReportSourceType
+  title?: string
+  filterSummary?: string
+}
+
 export const DEFAULT_TEMPLATE: AnalysisTemplate = {
   id: 'default',
   name: '奶员外风格',
@@ -199,10 +207,37 @@ export function buildPromptFromTemplate(
   template: AnalysisTemplate,
   stocks: any[],
   date: string,
-  financeContext?: string
+  financeContext?: string,
+  reportContext?: ReportPromptContext
 ): string {
-  const stockList = stocks.map(s => `${s.stock_code} ${s.stock_name}`).join('\n')
-  const stockContext = `📅 **日期**：${date}
+  const sourceType = reportContext?.sourceType || 'compare'
+  const stockList = stocks.map(s => {
+    if (sourceType === 'ranking') {
+      const concepts = Array.isArray(s.concepts) && s.concepts.length > 0 ? s.concepts.join('/') : '未提供'
+      const financeParts = [
+        typeof s.finance?.netProfitYoy === 'number' ? `净利润同比${s.finance.netProfitYoy}%` : '',
+        typeof s.finance?.revenueYoy === 'number' ? `营收同比${s.finance.revenueYoy}%` : '',
+        typeof s.finance?.roe === 'number' ? `ROE ${s.finance.roe}%` : '',
+      ].filter(Boolean).join('；') || '未提供'
+
+      return `${s.stock_code} ${s.stock_name}｜连续${s.continuous_count || '-'}天｜总出现${s.total_appear_count || '-'}次｜行业：${s.industry || '未分类'}｜概念：${concepts}｜财务：${financeParts}`
+    }
+
+    return `${s.stock_code} ${s.stock_name}`
+  }).join('\n')
+  const stockContext = sourceType === 'ranking'
+    ? `📅 **日期**：${date}
+📈 **连续榜单股票**：${stocks.length}只
+🎯 **报告标题**：${reportContext?.title || `${date} 连续榜单AI分析报告`}
+🔎 **筛选条件**：${reportContext?.filterSummary || '未设置额外筛选'}
+
+**连续榜单股票列表：**
+${stockList}
+
+⚠️ 数据边界：可以使用CAN SLIM、股票魔法师、陶博士框架进行解读，但禁止凭空声称RPS、平台突破、成交量放大或财务高增长；只有上方列表或财报上下文提供的数据才可作为事实引用。
+
+---`
+    : `📅 **日期**：${date}
 📈 **今日新增股票**：${stocks.length}只
 
 **股票列表：**
@@ -237,7 +272,12 @@ ${template.corePrinciples || ''}
 
 ${template.writingStyle || ''}
 
-${template.articleStructure || ''}
+${sourceType === 'ranking'
+    ? (template.articleStructure || '')
+      .replace(/今日新增股票/g, '筛选后连续榜单股票')
+      .replace(/今日新增/g, '榜单入选')
+      .replace(/新增标的/g, '榜单标的')
+    : (template.articleStructure || '')}
 
 ${template.writingTips || ''}`
 

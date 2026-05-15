@@ -8,6 +8,7 @@ const readySchema: StockGroupSchemaReadiness = {
   stock_compare_results_table_exists: true,
   report_templates_table_exists: true,
   stock_financial_reports_table_exists: true,
+  stock_metadata_table_exists: true,
   default_group_exists: true,
   batch_group_column_exists: true,
   batch_group_column_required: true,
@@ -16,7 +17,8 @@ const readySchema: StockGroupSchemaReadiness = {
   compare_group_column_exists: true,
   compare_group_column_required: true,
   batch_group_date_constraint_exists: true,
-  compare_batch_code_constraint_exists: true
+  compare_batch_code_constraint_exists: true,
+  stock_metadata_stock_code_key_exists: true
 }
 
 describe('isStockGroupSchemaReady', () => {
@@ -30,5 +32,15 @@ describe('isStockGroupSchemaReady', () => {
 
   it('returns false when group-aware comparison columns are not required yet', () => {
     expect(isStockGroupSchemaReady({ ...readySchema, compare_group_column_required: false })).toBe(false)
+  })
+
+  it('returns false when stock metadata cache is missing', () => {
+    expect(isStockGroupSchemaReady({ ...readySchema, stock_metadata_table_exists: false })).toBe(false)
+  })
+
+  it('returns false when metadata readiness checks are omitted by an older schema probe', () => {
+    const { stock_metadata_table_exists, stock_metadata_stock_code_key_exists, ...legacyReadiness } = readySchema
+
+    expect(isStockGroupSchemaReady(legacyReadiness as StockGroupSchemaReadiness)).toBe(false)
   })
 })

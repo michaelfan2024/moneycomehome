@@ -1,6 +1,6 @@
 import { Pool } from 'pg'
 import { randomUUID } from 'crypto'
-import type { StockBatch, StockPoolItem, StockCompareResult, StockDetail, DashboardStats, StockStatus, StockGroup } from '../types'
+import type { StockBatch, StockPoolItem, StockCompareResult, StockDetail, DashboardStats, StockStatus, StockGroup, StockMetadata } from '../types'
 import { getCache, setCache, invalidateCache } from './cache'
 import type { ReportTemplateInput, ReportTemplateRecord } from './report-template'
 import type { EastmoneyFinanceSummary } from './eastmoney-finance'
@@ -112,6 +112,7 @@ async function getStockGroupSchemaReadiness(client: Pool): Promise<StockGroupSch
       (to_regclass('public.stock_compare_results') IS NOT NULL) as stock_compare_results_table_exists,
       (to_regclass('public.report_templates') IS NOT NULL) as report_templates_table_exists,
       (to_regclass('public.stock_financial_reports') IS NOT NULL) as stock_financial_reports_table_exists,
+      (to_regclass('public.stock_metadata') IS NOT NULL) as stock_metadata_table_exists,
       EXISTS (
         SELECT 1
         FROM information_schema.columns
@@ -162,7 +163,10 @@ async function getStockGroupSchemaReadiness(client: Pool): Promise<StockGroupSch
       ) as batch_group_date_constraint_exists,
       EXISTS (
         SELECT 1 FROM pg_constraint WHERE conname = 'stock_compare_results_batch_code_key'
-      ) as compare_batch_code_constraint_exists
+      ) as compare_batch_code_constraint_exists,
+      EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'stock_metadata_stock_code_key'
+      ) as stock_metadata_stock_code_key_exists
   `)
 
   const metadata = metadataResult.rows[0]
@@ -183,6 +187,7 @@ async function getStockGroupSchemaReadiness(client: Pool): Promise<StockGroupSch
     stock_compare_results_table_exists: Boolean(metadata.stock_compare_results_table_exists),
     report_templates_table_exists: Boolean(metadata.report_templates_table_exists),
     stock_financial_reports_table_exists: Boolean(metadata.stock_financial_reports_table_exists),
+    stock_metadata_table_exists: Boolean(metadata.stock_metadata_table_exists),
     default_group_exists: defaultGroupExists,
     batch_group_column_exists: Boolean(metadata.batch_group_column_exists),
     batch_group_column_required: Boolean(metadata.batch_group_column_required),
@@ -191,7 +196,8 @@ async function getStockGroupSchemaReadiness(client: Pool): Promise<StockGroupSch
     compare_group_column_exists: Boolean(metadata.compare_group_column_exists),
     compare_group_column_required: Boolean(metadata.compare_group_column_required),
     batch_group_date_constraint_exists: Boolean(metadata.batch_group_date_constraint_exists),
-    compare_batch_code_constraint_exists: Boolean(metadata.compare_batch_code_constraint_exists)
+    compare_batch_code_constraint_exists: Boolean(metadata.compare_batch_code_constraint_exists),
+    stock_metadata_stock_code_key_exists: Boolean(metadata.stock_metadata_stock_code_key_exists)
   }
 }
 
@@ -359,6 +365,20 @@ export async function ensureTables(): Promise<void> {
           UNIQUE(stock_code, report_date)
         )
       `)
+
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS stock_metadata (
+          id SERIAL PRIMARY KEY,
+          stock_code TEXT NOT NULL,
+          stock_name TEXT NOT NULL,
+          industry TEXT,
+          concepts JSONB NOT NULL DEFAULT '[]'::jsonb,
+          source TEXT,
+          fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT stock_metadata_stock_code_key UNIQUE(stock_code)
+        )
+      `)
       
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_groups_active_name ON stock_groups(is_active, name)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_batches_group_date_desc ON stock_batches(group_id, batch_date DESC)')
@@ -375,6 +395,9 @@ export async function ensureTables(): Promise<void> {
       await client.query('CREATE INDEX IF NOT EXISTS idx_report_templates_updated_at ON report_templates(updated_at DESC)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_financial_reports_stock_code ON stock_financial_reports(stock_code)')
       await client.query('CREATE INDEX IF NOT EXISTS idx_stock_financial_reports_report_date ON stock_financial_reports(report_date DESC)')
+      await client.query('CREATE INDEX IF NOT EXISTS idx_stock_metadata_industry ON stock_metadata(industry)')
+      await client.query('CREATE INDEX IF NOT EXISTS idx_stock_metadata_concepts ON stock_metadata USING GIN(concepts)')
+      await client.query('CREATE INDEX IF NOT EXISTS idx_stock_metadata_fetched_at ON stock_metadata(fetched_at DESC)')
       
       tablesInitialized = true
       console.log('Database tables and indexes initialized')
@@ -1336,6 +1359,146 @@ export async function getContinuousRanking(minDays: number = 2, groupId?: string
     return result.rows
   } catch (error) {
     console.error('Error getting continuous ranking:', error)
+    return null
+  }
+}
+
+function normalizeMetadataConcepts(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean)
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return normalizeMetadataConcepts(parsed)
+    } catch {
+      return value.split(/[;,，、]/).map((item) => item.trim()).filter(Boolean)
+    }
+  }
+
+  return []
+}
+
+function mapStockMetadataRow(row: {
+  stock_code: string
+  stock_name: string
+  industry?: string | null
+  concepts?: unknown
+  source?: string | null
+  fetched_at?: string
+  updated_at?: string
+}): StockMetadata {
+  return {
+    stock_code: row.stock_code,
+    stock_name: row.stock_name,
+    industry: row.industry || null,
+    concepts: normalizeMetadataConcepts(row.concepts),
+    source: row.source || null,
+    fetched_at: row.fetched_at,
+    updated_at: row.updated_at,
+  }
+}
+
+export async function getStockMetadataByCodes(stockCodes: string[]): Promise<StockMetadata[]> {
+  const uniqueCodes = [...new Set(stockCodes.map((code) => String(code).trim()).filter(Boolean))]
+  if (uniqueCodes.length === 0) {
+    return []
+  }
+
+  try {
+    const client = await getClient()
+    const result = await client.query(
+      `
+      SELECT
+        stock_code,
+        stock_name,
+        industry,
+        concepts,
+        source,
+        fetched_at::text as fetched_at,
+        updated_at::text as updated_at
+      FROM stock_metadata
+      WHERE stock_code = ANY($1::text[])
+      `,
+      [uniqueCodes]
+    )
+
+    return result.rows.map(mapStockMetadataRow)
+  } catch (error) {
+    if (isMissingRelationError(error)) {
+      await ensureTables()
+      return getStockMetadataByCodes(stockCodes)
+    }
+    console.error('Error getting stock metadata:', error)
+    return []
+  }
+}
+
+export async function upsertStockMetadata(
+  metadataItems: Omit<StockMetadata, 'fetched_at' | 'updated_at'>[]
+): Promise<StockMetadata[] | null> {
+  const normalizedItems = metadataItems
+    .map((item) => ({
+      stock_code: String(item.stock_code).trim(),
+      stock_name: String(item.stock_name).trim(),
+      industry: item.industry?.trim() || null,
+      concepts: [...new Set((item.concepts || []).map((concept) => concept.trim()).filter(Boolean))],
+      source: item.source?.trim() || null,
+    }))
+    .filter((item) => item.stock_code && item.stock_name)
+
+  if (normalizedItems.length === 0) {
+    return []
+  }
+
+  try {
+    const client = await getClient()
+    const values: unknown[] = []
+    const placeholders = normalizedItems.map((item, index) => {
+      const offset = index * 5
+      values.push(item.stock_code, item.stock_name, item.industry, JSON.stringify(item.concepts), item.source)
+      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}::jsonb, $${offset + 5}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+    })
+
+    const result = await client.query(
+      `
+      INSERT INTO stock_metadata (
+        stock_code,
+        stock_name,
+        industry,
+        concepts,
+        source,
+        fetched_at,
+        updated_at
+      )
+      VALUES ${placeholders.join(', ')}
+      ON CONFLICT (stock_code) DO UPDATE SET
+        stock_name = EXCLUDED.stock_name,
+        industry = EXCLUDED.industry,
+        concepts = EXCLUDED.concepts,
+        source = EXCLUDED.source,
+        fetched_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+      RETURNING
+        stock_code,
+        stock_name,
+        industry,
+        concepts,
+        source,
+        fetched_at::text as fetched_at,
+        updated_at::text as updated_at
+      `,
+      values
+    )
+
+    return result.rows.map(mapStockMetadataRow)
+  } catch (error) {
+    if (isMissingRelationError(error)) {
+      await ensureTables()
+      return upsertStockMetadata(metadataItems)
+    }
+    console.error('Error upserting stock metadata:', error)
     return null
   }
 }

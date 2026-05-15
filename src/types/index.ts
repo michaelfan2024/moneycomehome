@@ -55,7 +55,9 @@ export interface StockMetadata {
 export interface RankingFinanceSnapshot {
   reportDate?: string
   reportType?: string
+  netProfit?: number | null
   netProfitYoy?: number | null
+  revenue?: number | null
   revenueYoy?: number | null
   roe?: number | null
 }

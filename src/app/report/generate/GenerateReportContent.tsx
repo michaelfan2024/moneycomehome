@@ -56,6 +56,7 @@ export default function GenerateReportContent() {
   const [templateViewMode, setTemplateViewMode] = useState<'edit' | 'preview'>('edit')
 
   const date = searchParams.get('date') || ''
+  const groupId = searchParams.get('groupId') || undefined
   const count = searchParams.get('count') || '0'
   const selectedWechatThemeDetails = THEMES.find((theme) => theme.id === selectedWechatTheme) || THEMES[0]
   const systemTemplates = useMemo(
@@ -72,7 +73,7 @@ export default function GenerateReportContent() {
       return
     }
     fetchStocks()
-  }, [date])
+  }, [date, groupId])
 
   useEffect(() => {
     fetchCustomTemplates()
@@ -82,7 +83,7 @@ export default function GenerateReportContent() {
     setLoading(true)
     setError(null)
     try {
-      const result = await getCompareResults(date)
+      const result = await getCompareResults(date, groupId)
       if (result.success && result.data) {
         const newStocks = result.data.filter(
           (s: StockCompareResult) => s.status === 'first_seen' || s.status === 'reappeared'
